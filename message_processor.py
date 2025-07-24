@@ -628,14 +628,18 @@ class MessageProcessor:
                     contains_urls = self._contains_urls(content)
                     logger.info(f"Sending text message. Contains URLs: {contains_urls}, Content: {content[:200]}...")
                     
-                    # Explicitly disable web page preview only if no URLs are detected
-                    disable_preview = not contains_urls
+                    # Enable web page preview for URLs, disable for plain text
+                    # disable_web_page_preview=False means preview is ENABLED
+                    # disable_web_page_preview=True means preview is DISABLED
+                    disable_preview = not contains_urls  # False if URLs present (preview enabled), True if no URLs (preview disabled)
+                    
+                    logger.info(f"Setting disable_web_page_preview={disable_preview} for message with URLs={contains_urls}")
                     
                     return await bot.send_message(
                         chat_id=chat_id,
                         text=content,
                         entities=converted_entities,
-                        disable_web_page_preview=disable_preview,  # Enable previews for URLs, disable for plain text
+                        disable_web_page_preview=disable_preview,
                         reply_to_message_id=reply_to_message_id
                     )
             
@@ -672,11 +676,13 @@ class MessageProcessor:
                 else:
                     # Final fallback: plain text without entities, check for URLs
                     contains_urls = self._contains_urls(content)
+                    disable_preview = not contains_urls
+                    logger.info(f"Fallback: Setting disable_web_page_preview={disable_preview} for URLs={contains_urls}")
                     return await bot.send_message(
                         chat_id=chat_id, 
                         text=content, 
                         reply_to_message_id=reply_to_message_id, 
-                        disable_web_page_preview=not contains_urls  # Enable preview only if URLs detected
+                        disable_web_page_preview=disable_preview
                     )
             except Exception as fallback_error:
                 logger.error(f"All fallback attempts failed: {fallback_error}")
@@ -984,16 +990,19 @@ class MessageProcessor:
             r'https?://[^\s<>"]+',                          # HTTP/HTTPS URLs
             r'www\.[^\s<>"]+\.[a-zA-Z]{2,}[^\s<>"]*',      # www URLs with domain and optional path
             r't\.me/[^\s<>"]+',                             # Telegram links
-            r'[a-zA-Z0-9.-]+\.(com|org|net|edu|gov|co|io|tv|me|ly|to|cc|repl|dev)[^\s<>"]*', # Common TLD URLs with paths
+            r'[a-zA-Z0-9.-]+\.(com|org|net|edu|gov|co|io|tv|me|ly|to|cc|repl|dev|app)[^\s<>"]*', # Common TLD URLs with paths
             r'ftp://[^\s<>"]+',                             # FTP URLs
             r'[a-zA-Z0-9.-]+\.replit\.com[^\s<>"]*',        # Replit URLs
+            r'[a-zA-Z0-9.-]+\.replit\.app[^\s<>"]*',        # Replit app URLs
         ]
         
         for pattern in url_patterns:
-            if re.search(pattern, text, re.IGNORECASE):
-                logger.info(f"Found URL pattern in text: {text[:200]}...")
+            match = re.search(pattern, text, re.IGNORECASE)
+            if match:
+                logger.info(f"Found URL pattern '{pattern}' in text: {text[:200]}... (matched: {match.group()})")
                 return True
         
+        logger.debug(f"No URL patterns found in text: {text[:200]}...")
         return False
     
     async def is_blocked_image(self, event, pair: MessagePair) -> bool:
