@@ -52,10 +52,10 @@ class MessageProcessor:
         try:
             self.stats['messages_processed'] += 1
             
-            # Check global word blocking first
+            # Check global and pair-specific word blocking first
             message_text = event.text or event.raw_text or ""
-            if self.is_blocked_word(message_text):
-                logger.info(f"Message blocked by global word filter: {message_text[:100]}...")
+            if self.is_blocked_word(message_text, pair):
+                logger.info(f"Message blocked by word filter (pair {pair.id}): {message_text[:100]}...")
                 self.stats['messages_filtered'] += 1
                 pair.stats['messages_filtered'] = pair.stats.get('messages_filtered', 0) + 1
                 pair.stats['words_blocked'] = pair.stats.get('words_blocked', 0) + 1
@@ -246,16 +246,10 @@ class MessageProcessor:
             
             logger.debug(f"Processing message content: {text[:100]}... (entities: {len(entities)})")
             
-            # Skip text processing if filters are disabled to preserve original formatting
-            if pair.filters.get("preserve_original_formatting", True):
-                # Only apply essential filters while preserving entities
-                filtered_text = text
-                processed_entities = self._convert_entities_for_telegram(entities) if entities else []
-                logger.debug(f"Preserved original formatting. Text length: {len(filtered_text)}")
-            else:
-                # Apply text filters with entity preservation
-                filtered_text, processed_entities = await self.message_filter.filter_text(text, pair, entities)
-                logger.debug(f"Applied text filters. Text length: {len(filtered_text)}")
+            # Always apply text filters (mention removal, header/footer, etc.) but preserve formatting
+            # First apply all text transformations
+            filtered_text, processed_entities = await self.message_filter.filter_text(text, pair, entities)
+            logger.debug(f"Applied text filters. Original: {len(text)}, Filtered: {len(filtered_text)}")
             
             # Check length limits
             min_length = pair.filters.get("min_message_length", 0)
@@ -969,15 +963,17 @@ class MessageProcessor:
         """Get processing statistics"""
         return self.stats.copy()
     
-    def is_blocked_word(self, text: str) -> bool:
+    def is_blocked_word(self, text: str, pair: MessagePair = None) -> bool:
         """
-        Global function to check if text contains blocked words
+        Check if text contains blocked words (global or pair-specific)
         Returns True if the message should be blocked
         """
         if not text:
             return False
         
-        # Check against global blocked words from config
+        text_lower = text.lower().strip()
+        
+        # Check global blocked words from config first
         BLOCKED_WORDS = getattr(self.config, 'GLOBAL_BLOCKED_WORDS', None)
         if BLOCKED_WORDS is None:
             # Fallback to environment variable or default list
@@ -991,17 +987,25 @@ class MessageProcessor:
                     "click here", "free", "limited time", "act now", "don't miss"
                 ]
         
-        if not BLOCKED_WORDS:
-            return False
+        # Check global blocked words
+        if BLOCKED_WORDS:
+            for word in BLOCKED_WORDS:
+                if isinstance(word, str) and word.strip():
+                    word_lower = word.strip().lower()
+                    if word_lower in text_lower:
+                        logger.info(f"Text blocked for global word: '{word}' found in: {text[:100]}...")
+                        return True
         
-        text_lower = text.lower().strip()
-        for word in BLOCKED_WORDS:
-            if isinstance(word, str) and word.strip():
-                word_lower = word.strip().lower()
-                # Check both exact matches and word boundaries
-                if word_lower in text_lower:
-                    logger.info(f"Text blocked for global word: '{word}' found in: {text[:100]}...")
-                    return True
+        # Check pair-specific blocked words
+        if pair:
+            pair_blocked_words = pair.filters.get("blocked_words", [])
+            if pair_blocked_words:
+                for word in pair_blocked_words:
+                    if isinstance(word, str) and word.strip():
+                        word_lower = word.strip().lower()
+                        if word_lower in text_lower:
+                            logger.info(f"Text blocked for pair {pair.id} word: '{word}' found in: {text[:100]}...")
+                            return True
         
         return False
     

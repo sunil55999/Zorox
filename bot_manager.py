@@ -279,10 +279,12 @@ class BotManager:
             pairs = await self.db_manager.get_all_pairs()
             self.pairs = {pair.id: pair for pair in pairs}
             
-            # Build source chat mapping
+            # Build optimized source chat mapping for fast lookups
             self.source_to_pairs.clear()
             for pair in pairs:
                 if pair.status == "active":
+                    if pair.source_chat_id not in self.source_to_pairs:
+                        self.source_to_pairs[pair.source_chat_id] = []
                     self.source_to_pairs[pair.source_chat_id].append(pair.id)
             
             logger.info(f"Loaded {len(pairs)} pairs from database")

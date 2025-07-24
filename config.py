@@ -32,8 +32,8 @@ class Config:
         self.REDIS_URL = os.getenv('REDIS_URL', "redis://localhost:6379")
         self.USE_REDIS = os.getenv('USE_REDIS', 'false').lower() == 'true'
         
-        # System settings
-        self.MAX_WORKERS = int(os.getenv('MAX_WORKERS', '10'))
+        # System settings optimized for 80-90 pairs
+        self.MAX_WORKERS = int(os.getenv('MAX_WORKERS', '20'))  # Increased for many pairs
         self.DEBUG_MODE = os.getenv('DEBUG_MODE', 'false').lower() == 'true'
         self.SIMILARITY_THRESHOLD = int(os.getenv('SIMILARITY_THRESHOLD', '5'))
         
@@ -41,10 +41,11 @@ class Config:
         self.DATABASE_PATH = os.getenv('DATABASE_PATH', 'bot.db')
         self.DATABASE_BACKUP_INTERVAL = int(os.getenv('DATABASE_BACKUP_INTERVAL', '3600'))
         
-        # Performance settings
-        self.MESSAGE_QUEUE_SIZE = int(os.getenv('MESSAGE_QUEUE_SIZE', '1000'))
+        # Performance settings optimized for high throughput
+        self.MESSAGE_QUEUE_SIZE = int(os.getenv('MESSAGE_QUEUE_SIZE', '5000'))  # Larger queue
         self.MAX_RETRIES = int(os.getenv('MAX_RETRIES', '3'))
-        self.RETRY_DELAY = float(os.getenv('RETRY_DELAY', '1.0'))
+        self.RETRY_DELAY = float(os.getenv('RETRY_DELAY', '0.5'))  # Faster retries
+        self.BATCH_SIZE = int(os.getenv('BATCH_SIZE', '25'))  # Process in batches
         
         # Rate limiting
         self.RATE_LIMIT_MESSAGES = int(os.getenv('RATE_LIMIT_MESSAGES', '30'))
@@ -118,13 +119,13 @@ class Config:
         if not self.ADMIN_BOT_TOKEN:
             logger.warning("ADMIN_BOT_TOKEN not set - admin commands will not be available")
         
-        # Validate numeric ranges
-        if self.MAX_WORKERS < 1 or self.MAX_WORKERS > 50:
-            errors.append("MAX_WORKERS must be between 1 and 50")
+        # Validate numeric ranges for high-scale operation
+        if self.MAX_WORKERS < 1 or self.MAX_WORKERS > 100:  # Allow more workers
+            errors.append("MAX_WORKERS must be between 1 and 100")
         if self.SIMILARITY_THRESHOLD < 1 or self.SIMILARITY_THRESHOLD > 20:
             errors.append("SIMILARITY_THRESHOLD must be between 1 and 20")
-        if self.MESSAGE_QUEUE_SIZE < 100:
-            errors.append("MESSAGE_QUEUE_SIZE must be at least 100")
+        if self.MESSAGE_QUEUE_SIZE < 1000:  # Minimum queue for many pairs
+            errors.append("MESSAGE_QUEUE_SIZE must be at least 1000")
         
         if errors:
             for error in errors:

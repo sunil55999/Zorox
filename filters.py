@@ -189,9 +189,15 @@ class MessageFilter:
             
             # Process mentions with optional placeholders
             if pair.filters.get("remove_mentions", False):
-                filtered_text, processed_entities = self._process_mentions(
-                    filtered_text, processed_entities, pair
-                )
+                placeholder = pair.filters.get("mention_placeholder", "[User]")
+                filtered_text = self._remove_mentions(filtered_text, placeholder)
+                # Filter entities that may be out of bounds after mention removal
+                if len(filtered_text) != len(text):
+                    processed_entities = [
+                        e for e in processed_entities 
+                        if hasattr(e, 'offset') and hasattr(e, 'length') and 
+                        e.offset + e.length <= len(filtered_text)
+                    ]
             
             # Apply word replacements
             word_replacements = pair.filters.get("word_replacements", {})
@@ -729,3 +735,56 @@ class MessageFilter:
         except Exception as e:
             logger.error(f"Failed to set mention removal: {e}")
             return False
+    
+    def _remove_mentions(self, text: str, placeholder: str = "[User]") -> str:
+        """Remove mentions from text and replace with placeholder"""
+        try:
+            # Remove @username mentions
+            text = re.sub(r'@\w+', placeholder, text)
+            
+            # Remove user links (tg://user?id=...)
+            text = re.sub(r'tg://user\?id=\d+', placeholder, text)
+            
+            return text.strip()
+        except Exception as e:
+            logger.error(f"Error removing mentions: {e}")
+            return text
+    
+    def _remove_headers(self, text: str, patterns: List[str]) -> str:
+        """Remove headers based on regex patterns"""
+        try:
+            if not patterns:
+                # Default header patterns if none specified
+                patterns = [
+                    r'^.*?[:|：].*?\n',  # Lines ending with : or ：
+                    r'^.*?➜.*?\n',      # Lines with arrow
+                    r'^.*?👉.*?\n',     # Lines with pointing emoji
+                    r'^.*?📢.*?\n'      # Lines with megaphone
+                ]
+            
+            for pattern in patterns:
+                text = re.sub(pattern, '', text, flags=re.MULTILINE)
+            
+            return text.strip()
+        except Exception as e:
+            logger.error(f"Error removing headers: {e}")
+            return text
+    
+    def _remove_footers(self, text: str, patterns: List[str]) -> str:
+        """Remove footers based on regex patterns"""
+        try:
+            if not patterns:
+                # Default footer patterns if none specified
+                patterns = [
+                    r'\n.*?@\w+.*?$',           # Lines with @mentions at end
+                    r'\n.*?t\.me/.*?$',         # Lines with t.me links at end
+                    r'\n.*?[📨📱💌].*?$',        # Lines with contact emojis at end
+                ]
+            
+            for pattern in patterns:
+                text = re.sub(pattern, '', text, flags=re.MULTILINE)
+            
+            return text.strip()
+        except Exception as e:
+            logger.error(f"Error removing footers: {e}")
+            return text
