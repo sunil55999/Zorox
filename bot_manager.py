@@ -84,12 +84,6 @@ class BotManager:
         self.config = config
         self.message_processor = MessageProcessor(db_manager, config)
         
-        # Initialize filter components
-        from filters import MessageFilter
-        from image_handler import ImageHandler
-        self.message_filter = MessageFilter(db_manager, config)
-        self.image_handler = ImageHandler(db_manager, config)
-        
         # Bot instances
         self.telegram_bots: List[Bot] = []
         self.bot_applications: List[Application] = []
@@ -1389,18 +1383,14 @@ class BotManager:
             if len(context.args) > 1:
                 # Block for specific pair
                 pair_id = int(context.args[1])
-                if pair_id in self.pairs:
-                    pair = self.pairs[pair_id]
-                    if 'blocked_words' not in pair.filters:
-                        pair.filters['blocked_words'] = []
-                    if word not in pair.filters['blocked_words']:
-                        pair.filters['blocked_words'].append(word)
+                success = await self.message_filter.add_pair_word_block(pair_id, word)
+                if success:
                     await update.message.reply_text(f"✅ Blocked word '{word}' for pair {pair_id}")
                 else:
-                    await update.message.reply_text(f"❌ Pair {pair_id} not found")
+                    await update.message.reply_text(f"❌ Failed to block word for pair {pair_id}")
             else:
-                # Store global block in database
-                await self.db_manager.set_setting(f"global_blocked_word_{word}", "true")
+                # Block globally
+                await self.message_filter.add_global_word_block(word)
                 await update.message.reply_text(f"✅ Globally blocked word '{word}'")
                 
         except ValueError:
@@ -1426,18 +1416,14 @@ class BotManager:
             if len(context.args) > 1:
                 # Unblock for specific pair
                 pair_id = int(context.args[1])
-                if pair_id in self.pairs:
-                    pair = self.pairs[pair_id]
-                    if 'blocked_words' in pair.filters and word in pair.filters['blocked_words']:
-                        pair.filters['blocked_words'].remove(word)
-                        await update.message.reply_text(f"✅ Unblocked word '{word}' for pair {pair_id}")
-                    else:
-                        await update.message.reply_text(f"❌ Word '{word}' not blocked for pair {pair_id}")
+                success = await self.message_filter.remove_pair_word_block(pair_id, word)
+                if success:
+                    await update.message.reply_text(f"✅ Unblocked word '{word}' for pair {pair_id}")
                 else:
-                    await update.message.reply_text(f"❌ Pair {pair_id} not found")
+                    await update.message.reply_text(f"❌ Failed to unblock word for pair {pair_id}")
             else:
-                # Remove global block
-                await self.db_manager.set_setting(f"global_blocked_word_{word}", "false")
+                # Unblock globally
+                await self.message_filter.remove_global_word_block(word)
                 await update.message.reply_text(f"✅ Globally unblocked word '{word}'")
                 
         except ValueError:
@@ -1455,18 +1441,10 @@ class BotManager:
             if context.args:
                 pair_id = int(context.args[0])
             
-            blocked_text = "🚫 **Blocked Words:**\n\n"
+            # Get global blocks
+            global_words = self.message_filter.global_blocks.get("words", [])
             
-            # Get global blocks from settings
-            global_words = []
-            try:
-                settings = await self.db_manager.get_all_settings()
-                for key, value in settings.items():
-                    if key.startswith("global_blocked_word_") and value == "true":
-                        word = key.replace("global_blocked_word_", "")
-                        global_words.append(word)
-            except:
-                pass
+            blocked_text = "🚫 **Blocked Words:**\n\n"
             
             if global_words:
                 blocked_text += "**Global Blocks:**\n"
@@ -1484,8 +1462,6 @@ class BotManager:
                             blocked_text += f"• {word}\n"
                     else:
                         blocked_text += f"**Pair {pair_id}:** No blocked words\n"
-                else:
-                    blocked_text += f"**Pair {pair_id}:** Not found\n"
             else:
                 blocked_text += "Use `/listblocked <pair_id>` to see pair-specific blocks"
             
@@ -1511,47 +1487,67 @@ class BotManager:
                 )
                 return
             
-            # For now, just store a simple image block reference
-            image_file_id = reply_msg.photo[-1].file_id
+            block_scope = "global"
+            pair_id = None
+            description = "Blocked via bot command"
             
             if context.args:
                 try:
                     pair_id = int(context.args[0])
-                    await self.db_manager.set_setting(f"blocked_image_pair_{pair_id}_{image_file_id}", "true")
-                    await update.message.reply_text(f"✅ Image blocked for pair {pair_id}")
+                    block_scope = "pair"
+                    if len(context.args) > 1:
+                        description = " ".join(context.args[1:])
                 except ValueError:
-                    # Global block
-                    await self.db_manager.set_setting(f"blocked_image_global_{image_file_id}", "true")
-                    await update.message.reply_text("✅ Image blocked globally")
+                    # First argument is description, not pair_id
+                    description = " ".join(context.args)
+            
+            # Create a mock event for image processing
+            class MockEvent:
+                def __init__(self, message):
+                    self.id = message.message_id
+                    self.media = message.photo[-1] if message.photo else None
+                    self.client = None  # Will need to be handled
+            
+            mock_event = MockEvent(reply_msg)
+            pair = self.pairs.get(pair_id) if pair_id else None
+            
+            success = await self.image_handler.add_image_block(
+                mock_event, pair, description, 
+                str(update.effective_user.id), block_scope
+            )
+            
+            if success:
+                scope_text = f"for pair {pair_id}" if block_scope == "pair" else "globally"
+                await update.message.reply_text(f"✅ Image blocked {scope_text}")
             else:
-                await self.db_manager.set_setting(f"blocked_image_global_{image_file_id}", "true")
-                await update.message.reply_text("✅ Image blocked globally")
+                await update.message.reply_text("❌ Failed to block image")
                 
         except Exception as e:
             await update.message.reply_text(f"Error blocking image: {e}")
     
     async def _cmd_unblock_image(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Unblock image by ID"""
+        """Unblock image by hash"""
         if not self._is_admin(update.effective_user.id):
             return
         
         try:
             if not context.args:
                 await update.message.reply_text(
-                    "Usage: /unblockimage <image_file_id> [pair_id]\n"
+                    "Usage: /unblockimage <image_hash> [pair_id]\n"
                     "Without pair_id, removes global block"
                 )
                 return
             
-            image_id = context.args[0]
+            image_hash = context.args[0]
             pair_id = int(context.args[1]) if len(context.args) > 1 else None
             
-            if pair_id:
-                await self.db_manager.set_setting(f"blocked_image_pair_{pair_id}_{image_id}", "false")
-                await update.message.reply_text(f"✅ Image unblocked for pair {pair_id}")
+            success = await self.image_handler.remove_image_block(image_hash, pair_id)
+            
+            if success:
+                scope_text = f"for pair {pair_id}" if pair_id else "globally"
+                await update.message.reply_text(f"✅ Image unblocked {scope_text}")
             else:
-                await self.db_manager.set_setting(f"blocked_image_global_{image_id}", "false")
-                await update.message.reply_text("✅ Image unblocked globally")
+                await update.message.reply_text("❌ Failed to unblock image")
                 
         except ValueError:
             await update.message.reply_text("Invalid pair ID.")
@@ -1564,15 +1560,9 @@ class BotManager:
             return
         
         try:
-            # Get blocked images from settings
-            blocked_images = []
-            try:
-                settings = await self.db_manager.get_all_settings()
-                for key, value in settings.items():
-                    if (key.startswith("blocked_image_") and value == "true"):
-                        blocked_images.append(key)
-            except:
-                pass
+            pair_id = int(context.args[0]) if context.args else None
+            
+            blocked_images = await self.image_handler.get_blocked_images(pair_id)
             
             if not blocked_images:
                 await update.message.reply_text("No blocked images found.")
@@ -1580,19 +1570,24 @@ class BotManager:
             
             images_text = f"🖼️ **Blocked Images ({len(blocked_images)}):**\n\n"
             
-            for img_key in blocked_images[:10]:  # Limit to 10 for readability
-                if "global" in img_key:
-                    scope = "Global"
-                else:
-                    scope = "Pair-specific"
-                images_text += f"**ID:** `{img_key.split('_')[-1][:20]}...`\n"
-                images_text += f"**Scope:** {scope}\n\n"
+            for img in blocked_images[:10]:  # Limit to 10 for readability
+                scope = img['block_scope']
+                images_text += f"**Hash:** `{img['phash'][:16]}...`\n"
+                images_text += f"**Scope:** {scope}"
+                if img['pair_id']:
+                    images_text += f" (Pair {img['pair_id']})"
+                images_text += f"\n**Used:** {img['usage_count']} times\n"
+                if img['description']:
+                    images_text += f"**Description:** {img['description']}\n"
+                images_text += "\n"
             
             if len(blocked_images) > 10:
                 images_text += f"... and {len(blocked_images) - 10} more images"
             
             await update.message.reply_text(images_text, parse_mode='Markdown')
             
+        except ValueError:
+            await update.message.reply_text("Invalid pair ID.")
         except Exception as e:
             await update.message.reply_text(f"Error listing blocked images: {e}")
     
@@ -1618,20 +1613,17 @@ class BotManager:
                 await update.message.reply_text("Action must be 'enable' or 'disable'")
                 return
             
-            if pair_id in self.pairs:
-                pair = self.pairs[pair_id]
-                remove_mentions = action == 'enable'
-                pair.filters['remove_mentions'] = remove_mentions
-                if placeholder:
-                    pair.filters['mention_placeholder'] = placeholder
-                
+            remove_mentions = action == 'enable'
+            success = await self.message_filter.set_mention_removal(pair_id, remove_mentions, placeholder)
+            
+            if success:
                 if remove_mentions:
                     placeholder_text = f" with placeholder '{placeholder}'" if placeholder else " (complete removal)"
                     await update.message.reply_text(f"✅ Mention removal enabled for pair {pair_id}{placeholder_text}")
                 else:
                     await update.message.reply_text(f"✅ Mention removal disabled for pair {pair_id}")
             else:
-                await update.message.reply_text(f"❌ Pair {pair_id} not found")
+                await update.message.reply_text(f"❌ Failed to update mention removal for pair {pair_id}")
                 
         except ValueError:
             await update.message.reply_text("Invalid pair ID.")
@@ -1658,16 +1650,15 @@ class BotManager:
             if pattern.lower() == 'clear':
                 pattern = None
             
-            if pair_id in self.pairs:
-                pair = self.pairs[pair_id]
+            success = await self.message_filter.set_pair_header_footer_regex(pair_id, header_regex=pattern)
+            
+            if success:
                 if pattern:
-                    pair.filters['header_regex'] = pattern
                     await update.message.reply_text(f"✅ Header regex set for pair {pair_id}: `{pattern}`")
                 else:
-                    pair.filters.pop('header_regex', None)
                     await update.message.reply_text(f"✅ Header regex cleared for pair {pair_id}")
             else:
-                await update.message.reply_text(f"❌ Pair {pair_id} not found")
+                await update.message.reply_text(f"❌ Failed to set header regex for pair {pair_id}")
                 
         except ValueError:
             await update.message.reply_text("Invalid pair ID.")
@@ -1694,16 +1685,15 @@ class BotManager:
             if pattern.lower() == 'clear':
                 pattern = None
             
-            if pair_id in self.pairs:
-                pair = self.pairs[pair_id]
+            success = await self.message_filter.set_pair_header_footer_regex(pair_id, footer_regex=pattern)
+            
+            if success:
                 if pattern:
-                    pair.filters['footer_regex'] = pattern
                     await update.message.reply_text(f"✅ Footer regex set for pair {pair_id}: `{pattern}`")
                 else:
-                    pair.filters.pop('footer_regex', None)
                     await update.message.reply_text(f"✅ Footer regex cleared for pair {pair_id}")
             else:
-                await update.message.reply_text(f"❌ Pair {pair_id} not found")
+                await update.message.reply_text(f"❌ Failed to set footer regex for pair {pair_id}")
                 
         except ValueError:
             await update.message.reply_text("Invalid pair ID.")
@@ -1732,29 +1722,8 @@ class BotManager:
             
             pair = self.pairs[pair_id]
             
-            # Simple filtering simulation
-            filtered_text = test_text
-            
-            # Apply mention removal if enabled
-            if pair.filters.get("remove_mentions"):
-                import re
-                placeholder = pair.filters.get("mention_placeholder", "")
-                filtered_text = re.sub(r'@\w+', placeholder, filtered_text)
-            
-            # Apply regex filters
-            if pair.filters.get("header_regex"):
-                import re
-                try:
-                    filtered_text = re.sub(pair.filters["header_regex"], "", filtered_text)
-                except:
-                    pass
-            
-            if pair.filters.get("footer_regex"):
-                import re
-                try:
-                    filtered_text = re.sub(pair.filters["footer_regex"], "", filtered_text)
-                except:
-                    pass
+            # Apply text filtering
+            filtered_text, entities = await self.message_filter.filter_text(test_text, pair, [])
             
             result_text = f"🧪 **Filter Test Results for Pair {pair_id}:**\n\n"
             result_text += f"**Original:** {test_text}\n\n"
