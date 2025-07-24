@@ -16,7 +16,6 @@ from config import Config, validate_environment
 from database import DatabaseManager
 from bot_manager import BotManager
 from health_monitor import HealthMonitor
-from web_dashboard import DashboardServer
 
 # Configure logging
 os.makedirs('logs', exist_ok=True)
@@ -38,7 +37,6 @@ class TelegramBotSystem:
         self.db_manager = None
         self.bot_manager = None
         self.health_monitor = None
-        self.dashboard_server = None
         self.running = False
         self._shutdown_event = asyncio.Event()
         self._start_time = time.time()
@@ -65,13 +63,6 @@ class TelegramBotSystem:
             # Initialize health monitor
             self.health_monitor = HealthMonitor(self.bot_manager, self.db_manager)
             
-            # Initialize dashboard server
-            self.dashboard_server = DashboardServer(
-                self.bot_manager, 
-                self.db_manager, 
-                self.health_monitor
-            )
-            
             logger.info("System initialization completed successfully")
             
         except Exception as e:
@@ -84,13 +75,14 @@ class TelegramBotSystem:
             self.running = True
             
             # Start components
-            await self.bot_manager.start()
-            await self.health_monitor.start()
-            await self.dashboard_server.start()
+            if self.bot_manager:
+                await self.bot_manager.start()
+            if self.health_monitor:
+                await self.health_monitor.start()
             
             logger.info("=== Telegram Bot System Started ===")
             logger.info(f"Active bot tokens: {len(self.config.BOT_TOKENS)}")
-            logger.info(f"Dashboard available at: http://{self.config.DASHBOARD_HOST}:{self.config.DASHBOARD_PORT}")
+            logger.info(f"Bot management available via Telegram commands")
             logger.info(f"Debug mode: {self.config.DEBUG_MODE}")
             
             # Wait for shutdown signal
@@ -111,10 +103,7 @@ class TelegramBotSystem:
         self.running = False
         
         try:
-            # Stop components in reverse order
-            if self.dashboard_server:
-                await self.dashboard_server.stop()
-                
+            # Stop components in reverse order               
             if self.health_monitor:
                 await self.health_monitor.stop()
                 

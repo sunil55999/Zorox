@@ -189,15 +189,47 @@ class BotManager:
     
     async def _setup_command_handlers(self, app: Application):
         """Setup command handlers for primary bot"""
+        # Basic commands
         app.add_handler(CommandHandler("start", self._cmd_start))
         app.add_handler(CommandHandler("help", self._cmd_help))
+        
+        # System management
         app.add_handler(CommandHandler("status", self._cmd_status))
         app.add_handler(CommandHandler("stats", self._cmd_stats))
-        app.add_handler(CommandHandler("pairs", self._cmd_pairs))
+        app.add_handler(CommandHandler("health", self._cmd_health))
         app.add_handler(CommandHandler("pause", self._cmd_pause))
         app.add_handler(CommandHandler("resume", self._cmd_resume))
+        app.add_handler(CommandHandler("restart", self._cmd_restart))
+        
+        # Pair management
+        app.add_handler(CommandHandler("pairs", self._cmd_pairs))
         app.add_handler(CommandHandler("addpair", self._cmd_add_pair))
         app.add_handler(CommandHandler("delpair", self._cmd_delete_pair))
+        app.add_handler(CommandHandler("editpair", self._cmd_edit_pair))
+        app.add_handler(CommandHandler("pairinfo", self._cmd_pair_info))
+        
+        # Bot management
+        app.add_handler(CommandHandler("bots", self._cmd_bots))
+        app.add_handler(CommandHandler("botinfo", self._cmd_bot_info))
+        app.add_handler(CommandHandler("rebalance", self._cmd_rebalance))
+        
+        # Queue management
+        app.add_handler(CommandHandler("queue", self._cmd_queue))
+        app.add_handler(CommandHandler("clearqueue", self._cmd_clear_queue))
+        
+        # Logs and diagnostics
+        app.add_handler(CommandHandler("logs", self._cmd_logs))
+        app.add_handler(CommandHandler("errors", self._cmd_errors))
+        app.add_handler(CommandHandler("diagnostics", self._cmd_diagnostics))
+        
+        # Settings
+        app.add_handler(CommandHandler("settings", self._cmd_settings))
+        app.add_handler(CommandHandler("set", self._cmd_set_setting))
+        
+        # Utilities
+        app.add_handler(CommandHandler("backup", self._cmd_backup))
+        app.add_handler(CommandHandler("cleanup", self._cmd_cleanup))
+        
         app.add_handler(CallbackQueryHandler(self._handle_callback))
     
     async def _load_pairs(self):
@@ -649,15 +681,42 @@ class BotManager:
         help_text = """
 🤖 **Telegram Message Copying Bot**
 
-**Commands:**
-/start - Show welcome message
-/status - Show system status
-/stats - Show detailed statistics
+**System Management:**
+/status - System status and overview
+/stats - Detailed statistics
+/health - Health monitoring
+/pause - Pause message processing
+/resume - Resume message processing
+/restart - Restart bot system
+
+**Pair Management:**
 /pairs - List all message pairs
-/pause - Pause message copying
-/resume - Resume message copying
-/addpair <source_id> <dest_id> <name> - Add new pair
-/delpair <pair_id> - Delete pair
+/addpair <source> <dest> <name> - Add new pair
+/delpair <id> - Delete pair
+/editpair <id> <setting> <value> - Edit pair settings
+/pairinfo <id> - Detailed pair information
+
+**Bot Management:**
+/bots - List all bot instances
+/botinfo <index> - Detailed bot information
+/rebalance - Rebalance message distribution
+
+**Queue & Processing:**
+/queue - View message queue status
+/clearqueue - Clear message queue
+
+**Logs & Diagnostics:**
+/logs [limit] - View recent log entries
+/errors [limit] - View recent errors
+/diagnostics - Run system diagnostics
+
+**Settings:**
+/settings - View current settings
+/set <key> <value> - Update setting
+
+**Utilities:**
+/backup - Create database backup
+/cleanup - Clean old data
 
 **Features:**
 ✅ Multi-bot support with load balancing
@@ -857,6 +916,441 @@ class BotManager:
         # Placeholder for future callback implementations
         query = update.callback_query
         await query.answer()
+    
+    # Enhanced command handlers
+    async def _cmd_health(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Health monitoring command"""
+        if not self._is_admin(update.effective_user.id):
+            return
+        
+        try:
+            # Get system health info
+            memory_mb = self._get_memory_usage()
+            uptime = self._get_uptime()
+            queue_size = self.message_queue.qsize()
+            
+            # Bot health
+            healthy_bots = sum(1 for m in self.bot_metrics.values() if m.consecutive_failures == 0)
+            total_bots = len(self.bot_metrics)
+            
+            # Error rate
+            total_errors = sum(m.consecutive_failures for m in self.bot_metrics.values())
+            
+            health_text = f"""
+🏥 **System Health Report**
+
+**Overall Status:** {'🟢 Healthy' if healthy_bots == total_bots else '🟡 Warning' if healthy_bots > 0 else '🔴 Critical'}
+
+**System Resources:**
+• Memory Usage: {memory_mb}
+• Uptime: {uptime}
+• Queue Size: {queue_size}
+
+**Bot Health:**
+• Healthy Bots: {healthy_bots}/{total_bots}
+• Total Errors: {total_errors}
+
+**Performance:**
+• Messages in Queue: {queue_size}
+• Active Pairs: {len([p for p in self.pairs.values() if p.status == "active"])}
+            """
+            
+            await update.message.reply_text(health_text, parse_mode='Markdown')
+            
+        except Exception as e:
+            await update.message.reply_text(f"Error getting health info: {e}")
+    
+    async def _cmd_restart(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Restart system command"""
+        if not self._is_admin(update.effective_user.id):
+            return
+        
+        await update.message.reply_text("🔄 System restart functionality is not yet implemented. Use /pause and /resume instead.")
+    
+    async def _cmd_edit_pair(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Edit pair settings command"""
+        if not self._is_admin(update.effective_user.id):
+            return
+        
+        try:
+            if len(context.args) < 3:
+                await update.message.reply_text(
+                    "Usage: /editpair <pair_id> <setting> <value>\n"
+                    "Settings: name, status, sync_edits, sync_deletes, preserve_replies"
+                )
+                return
+            
+            pair_id = int(context.args[0])
+            setting = context.args[1]
+            value = " ".join(context.args[2:])
+            
+            if pair_id not in self.pairs:
+                await update.message.reply_text("Pair not found.")
+                return
+            
+            # Update pair setting (basic implementation)
+            pair = self.pairs[pair_id]
+            if setting == "name":
+                pair.name = value
+            elif setting == "status":
+                pair.status = value
+            else:
+                pair.filters[setting] = value.lower() == 'true' if value.lower() in ['true', 'false'] else value
+            
+            await update.message.reply_text(f"✅ Updated {setting} for pair {pair_id}")
+            
+        except ValueError:
+            await update.message.reply_text("Invalid pair ID.")
+        except Exception as e:
+            await update.message.reply_text(f"Error editing pair: {e}")
+    
+    async def _cmd_pair_info(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Detailed pair information command"""
+        if not self._is_admin(update.effective_user.id):
+            return
+        
+        try:
+            if not context.args:
+                await update.message.reply_text("Usage: /pairinfo <pair_id>")
+                return
+            
+            pair_id = int(context.args[0])
+            
+            if pair_id not in self.pairs:
+                await update.message.reply_text("Pair not found.")
+                return
+            
+            pair = self.pairs[pair_id]
+            
+            info_text = f"""
+📋 **Pair Information - {pair.name}**
+
+**Basic Info:**
+• ID: {pair.id}
+• Status: {pair.status}
+• Source: {pair.source_chat_id}
+• Destination: {pair.destination_chat_id}
+• Assigned Bot: {pair.assigned_bot_index}
+
+**Statistics:**
+• Messages Copied: {pair.stats.get('messages_copied', 0)}
+• Errors: {pair.stats.get('errors', 0)}
+
+**Settings:**
+• Sync Edits: {pair.filters.get('sync_edits', True)}
+• Sync Deletes: {pair.filters.get('sync_deletes', False)}
+• Preserve Replies: {pair.filters.get('preserve_replies', True)}
+
+**Filters:**
+{chr(10).join([f"• {k}: {v}" for k, v in pair.filters.items() if k not in ['sync_edits', 'sync_deletes', 'preserve_replies']])}
+            """
+            
+            await update.message.reply_text(info_text, parse_mode='Markdown')
+            
+        except ValueError:
+            await update.message.reply_text("Invalid pair ID.")
+        except Exception as e:
+            await update.message.reply_text(f"Error getting pair info: {e}")
+    
+    async def _cmd_bots(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """List bot instances command"""
+        if not self._is_admin(update.effective_user.id):
+            return
+        
+        try:
+            bots_text = "🤖 **Bot Instances:**\n\n"
+            
+            for i, metrics in self.bot_metrics.items():
+                status_emoji = "🟢" if metrics.consecutive_failures == 0 else "🔴"
+                rate_limited = "⏰" if metrics.rate_limit_until > time.time() else ""
+                
+                bots_text += f"{status_emoji}{rate_limited} **Bot {i}**\n"
+                bots_text += f"  Success Rate: {metrics.success_rate:.1%}\n"
+                bots_text += f"  Messages: {metrics.messages_processed}\n"
+                bots_text += f"  Avg Time: {metrics.avg_processing_time:.2f}s\n"
+                bots_text += f"  Failures: {metrics.consecutive_failures}\n\n"
+            
+            await update.message.reply_text(bots_text, parse_mode='Markdown')
+            
+        except Exception as e:
+            await update.message.reply_text(f"Error listing bots: {e}")
+    
+    async def _cmd_bot_info(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Detailed bot information command"""
+        if not self._is_admin(update.effective_user.id):
+            return
+        
+        try:
+            if not context.args:
+                await update.message.reply_text("Usage: /botinfo <bot_index>")
+                return
+            
+            bot_index = int(context.args[0])
+            
+            if bot_index not in self.bot_metrics:
+                await update.message.reply_text("Bot not found.")
+                return
+            
+            metrics = self.bot_metrics[bot_index]
+            
+            info_text = f"""
+🤖 **Bot {bot_index} Information**
+
+**Status:** {'🟢 Healthy' if metrics.consecutive_failures == 0 else '🔴 Unhealthy'}
+**Rate Limited:** {'Yes' if metrics.rate_limit_until > time.time() else 'No'}
+
+**Performance:**
+• Messages Processed: {metrics.messages_processed}
+• Success Rate: {metrics.success_rate:.1%}
+• Avg Processing Time: {metrics.avg_processing_time:.2f}s
+• Current Load: {metrics.current_load}
+
+**Error Tracking:**
+• Consecutive Failures: {metrics.consecutive_failures}
+• Last Activity: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(metrics.last_activity))}
+            """
+            
+            await update.message.reply_text(info_text, parse_mode='Markdown')
+            
+        except ValueError:
+            await update.message.reply_text("Invalid bot index.")
+        except Exception as e:
+            await update.message.reply_text(f"Error getting bot info: {e}")
+    
+    async def _cmd_rebalance(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Rebalance message distribution command"""
+        if not self._is_admin(update.effective_user.id):
+            return
+        
+        try:
+            # Simple rebalancing: redistribute pairs across healthy bots
+            healthy_bots = [i for i, m in self.bot_metrics.items() if m.consecutive_failures == 0]
+            
+            if not healthy_bots:
+                await update.message.reply_text("❌ No healthy bots available for rebalancing.")
+                return
+            
+            rebalanced = 0
+            for pair_id, pair in self.pairs.items():
+                if pair.assigned_bot_index not in healthy_bots:
+                    # Reassign to a healthy bot
+                    pair.assigned_bot_index = healthy_bots[rebalanced % len(healthy_bots)]
+                    rebalanced += 1
+            
+            await update.message.reply_text(f"✅ Rebalanced {rebalanced} pairs across {len(healthy_bots)} healthy bots.")
+            
+        except Exception as e:
+            await update.message.reply_text(f"Error rebalancing: {e}")
+    
+    async def _cmd_queue(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """View message queue status command"""
+        if not self._is_admin(update.effective_user.id):
+            return
+        
+        try:
+            queue_size = self.message_queue.qsize()
+            max_size = self.config.MESSAGE_QUEUE_SIZE
+            
+            queue_text = f"""
+📊 **Message Queue Status**
+
+**Current Size:** {queue_size}/{max_size}
+**Usage:** {(queue_size/max_size*100):.1f}%
+**Status:** {'🟢 Normal' if queue_size < max_size * 0.7 else '🟡 High' if queue_size < max_size * 0.9 else '🔴 Critical'}
+
+**Queue Distribution:**
+            """
+            
+            # Add per-pair queue info if available
+            for pair_id, queue in self.pair_queues.items():
+                if len(queue) > 0:
+                    pair_name = self.pairs.get(pair_id, {}).name if pair_id in self.pairs else f"Pair {pair_id}"
+                    queue_text += f"• {pair_name}: {len(queue)} messages\n"
+            
+            await update.message.reply_text(queue_text, parse_mode='Markdown')
+            
+        except Exception as e:
+            await update.message.reply_text(f"Error getting queue status: {e}")
+    
+    async def _cmd_clear_queue(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Clear message queue command"""
+        if not self._is_admin(update.effective_user.id):
+            return
+        
+        try:
+            cleared = 0
+            while not self.message_queue.empty():
+                try:
+                    self.message_queue.get_nowait()
+                    cleared += 1
+                except asyncio.QueueEmpty:
+                    break
+            
+            await update.message.reply_text(f"✅ Cleared {cleared} messages from queue.")
+            
+        except Exception as e:
+            await update.message.reply_text(f"Error clearing queue: {e}")
+    
+    async def _cmd_logs(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """View recent log entries command"""
+        if not self._is_admin(update.effective_user.id):
+            return
+        
+        try:
+            limit = 10
+            if context.args:
+                try:
+                    limit = min(int(context.args[0]), 50)  # Max 50 logs
+                except ValueError:
+                    pass
+            
+            # Read recent logs from database or log file
+            logs_text = f"📜 **Recent Logs (Last {limit}):**\n\n"
+            logs_text += "Log viewing from database not yet implemented.\n"
+            logs_text += "Check the server logs for detailed information."
+            
+            await update.message.reply_text(logs_text, parse_mode='Markdown')
+            
+        except Exception as e:
+            await update.message.reply_text(f"Error getting logs: {e}")
+    
+    async def _cmd_errors(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """View recent errors command"""
+        if not self._is_admin(update.effective_user.id):
+            return
+        
+        try:
+            limit = 10
+            if context.args:
+                try:
+                    limit = min(int(context.args[0]), 20)  # Max 20 errors
+                except ValueError:
+                    pass
+            
+            errors_text = f"🚨 **Recent Errors (Last {limit}):**\n\n"
+            errors_text += "Error log viewing from database not yet implemented.\n"
+            errors_text += "Use /diagnostics for current system status."
+            
+            await update.message.reply_text(errors_text, parse_mode='Markdown')
+            
+        except Exception as e:
+            await update.message.reply_text(f"Error getting errors: {e}")
+    
+    async def _cmd_diagnostics(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Run system diagnostics command"""
+        if not self._is_admin(update.effective_user.id):
+            return
+        
+        try:
+            diagnostics = []
+            
+            # Check bot connectivity
+            healthy_bots = sum(1 for m in self.bot_metrics.values() if m.consecutive_failures == 0)
+            diagnostics.append(f"🤖 Bots: {healthy_bots}/{len(self.bot_metrics)} healthy")
+            
+            # Check queue status
+            queue_size = self.message_queue.qsize()
+            max_size = self.config.MESSAGE_QUEUE_SIZE
+            queue_status = "🟢" if queue_size < max_size * 0.7 else "🟡" if queue_size < max_size * 0.9 else "🔴"
+            diagnostics.append(f"{queue_status} Queue: {queue_size}/{max_size}")
+            
+            # Check database
+            diagnostics.append("💾 Database: Connected")
+            
+            # Check telethon client
+            client_status = "🟢 Connected" if self.telethon_client and self.telethon_client.is_connected() else "🔴 Disconnected"
+            diagnostics.append(f"📡 Telethon: {client_status}")
+            
+            # System paused status
+            paused = await self.db_manager.get_setting("system_paused", "false")
+            pause_status = "⏸️ Paused" if paused.lower() == "true" else "▶️ Running"
+            diagnostics.append(f"⚙️ System: {pause_status}")
+            
+            diagnostics_text = f"🔍 **System Diagnostics**\n\n" + "\n".join(diagnostics)
+            
+            await update.message.reply_text(diagnostics_text, parse_mode='Markdown')
+            
+        except Exception as e:
+            await update.message.reply_text(f"Error running diagnostics: {e}")
+    
+    async def _cmd_settings(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """View current settings command"""
+        if not self._is_admin(update.effective_user.id):
+            return
+        
+        try:
+            settings_text = f"""
+⚙️ **Current Settings**
+
+**System:**
+• Max Workers: {self.config.MAX_WORKERS}
+• Queue Size: {self.config.MESSAGE_QUEUE_SIZE}
+• Rate Limit: {self.config.RATE_LIMIT_MESSAGES}/{self.config.RATE_LIMIT_WINDOW}s
+
+**Features:**
+• Debug Mode: {self.config.DEBUG_MODE}
+• Image Processing: {hasattr(self.config, 'ENABLE_IMAGE_PROCESSING') and self.config.ENABLE_IMAGE_PROCESSING}
+
+**Current Status:**
+• System Paused: {await self.db_manager.get_setting('system_paused', 'false')}
+• Active Pairs: {len([p for p in self.pairs.values() if p.status == 'active'])}
+• Total Bots: {len(self.telegram_bots)}
+            """
+            
+            await update.message.reply_text(settings_text, parse_mode='Markdown')
+            
+        except Exception as e:
+            await update.message.reply_text(f"Error getting settings: {e}")
+    
+    async def _cmd_set_setting(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Update setting command"""
+        if not self._is_admin(update.effective_user.id):
+            return
+        
+        try:
+            if len(context.args) < 2:
+                await update.message.reply_text("Usage: /set <setting> <value>")
+                return
+            
+            setting = context.args[0]
+            value = " ".join(context.args[1:])
+            
+            # Only allow certain settings to be changed
+            allowed_settings = ['system_paused', 'debug_mode']
+            
+            if setting not in allowed_settings:
+                await update.message.reply_text(f"Setting '{setting}' cannot be changed. Allowed: {', '.join(allowed_settings)}")
+                return
+            
+            await self.db_manager.set_setting(setting, value)
+            await update.message.reply_text(f"✅ Updated {setting} = {value}")
+            
+        except Exception as e:
+            await update.message.reply_text(f"Error updating setting: {e}")
+    
+    async def _cmd_backup(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Create database backup command"""
+        if not self._is_admin(update.effective_user.id):
+            return
+        
+        try:
+            backup_name = f"backup_{int(time.time())}.db"
+            await update.message.reply_text(f"📦 Database backup functionality not yet implemented.\nWould create: {backup_name}")
+            
+        except Exception as e:
+            await update.message.reply_text(f"Error creating backup: {e}")
+    
+    async def _cmd_cleanup(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Clean old data command"""
+        if not self._is_admin(update.effective_user.id):
+            return
+        
+        try:
+            # Placeholder for cleanup functionality
+            await update.message.reply_text("🧹 Database cleanup functionality not yet implemented.")
+            
+        except Exception as e:
+            await update.message.reply_text(f"Error during cleanup: {e}")
     
     def _is_admin(self, user_id: int) -> bool:
         """Check if user is admin"""

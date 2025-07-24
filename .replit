@@ -18,7 +18,7 @@ args = "Install Dependencies"
 
 [[workflows.workflow.tasks]]
 task = "workflow.run"
-args = "Demo Dashboard"
+args = "Bot System"
 
 [[workflows.workflow]]
 name = "Install Dependencies"
@@ -29,13 +29,12 @@ task = "shell.exec"
 args = "pip install python-telegram-bot telethon python-dotenv aiosqlite aiohttp aiohttp-jinja2 Pillow imagehash psutil"
 
 [[workflows.workflow]]
-name = "Demo Dashboard"
+name = "Bot System"
 author = "agent"
 
 [[workflows.workflow.tasks]]
 task = "shell.exec"
-args = "python demo.py"
-waitForPort = 5000
+args = "python main.py"
 
 [[ports]]
 localPort = 5000

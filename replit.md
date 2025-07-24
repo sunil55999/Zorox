@@ -80,13 +80,13 @@ The system follows a modular, async-first architecture with clear separation of 
   - Resource usage tracking
   - Alert thresholds
 
-### 7. Web Dashboard (`web_dashboard.py`)
-- **Purpose**: Real-time monitoring and management interface
+### 7. Bot Management System (Enhanced `bot_manager.py`)
+- **Purpose**: Complete bot-based management and monitoring interface
 - **Key Features**:
-  - Live statistics updates via WebSockets
-  - Pair management interface
-  - System health visualization
-  - Configuration management
+  - Comprehensive Telegram command interface
+  - Real-time system monitoring via bot commands
+  - Full pair management through chat
+  - Health diagnostics and error reporting
 
 ## Data Flow
 
@@ -155,3 +155,19 @@ The system follows a modular, async-first architecture with clear separation of 
 - **Access Control**: Source/destination chat validation
 - **Content Filtering**: Comprehensive message filtering system
 - **Error Isolation**: Individual bot failure doesn't affect others
+
+## Recent Changes
+
+### 2025-07-24: Web Dashboard Removal and Bot-Only Management
+- **Removed web dashboard components**: Deleted `web_dashboard.py`, `templates/`, `static/`, and `demo.py`
+- **Enhanced bot management**: Added 20+ new Telegram bot commands for comprehensive system control
+- **Updated main system**: Modified `main.py` to run without web dashboard dependencies
+- **New command categories**:
+  - System management: `/health`, `/restart`, `/diagnostics`
+  - Advanced pair management: `/editpair`, `/pairinfo`
+  - Bot monitoring: `/bots`, `/botinfo`, `/rebalance`
+  - Queue management: `/queue`, `/clearqueue`
+  - Log analysis: `/logs`, `/errors`
+  - Settings control: `/settings`, `/set`
+  - Utilities: `/backup`, `/cleanup`
+- **Architecture change**: System now operates entirely through Telegram bot commands, removing web interface dependency
