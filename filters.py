@@ -155,37 +155,17 @@ class MessageFilter:
             processed_entities = entities.copy() if entities else []
             
             # Remove header/footer based on regex patterns (per-pair)
-            header_pattern = pair.filters.get("header_regex")
-            if header_pattern:
-                try:
-                    compiled_regex = self._get_compiled_regex(header_pattern)
-                    match = compiled_regex.search(filtered_text)
-                    if match:
-                        # Remove header and adjust entity offsets
-                        header_length = match.end()
-                        filtered_text = filtered_text[header_length:]
-                        processed_entities = self._adjust_entities_after_removal(
-                            processed_entities, 0, header_length
-                        )
-                except re.error as e:
-                    logger.warning(f"Invalid header regex pattern {header_pattern}: {e}")
+            header_patterns = pair.filters.get("header_regex", [])
+            if header_patterns:
+                if isinstance(header_patterns, str):
+                    header_patterns = [header_patterns]
+                filtered_text = self._remove_headers(filtered_text, header_patterns)
             
-            footer_pattern = pair.filters.get("footer_regex")
-            if footer_pattern:
-                try:
-                    compiled_regex = self._get_compiled_regex(footer_pattern)
-                    match = compiled_regex.search(filtered_text)
-                    if match:
-                        # Remove footer
-                        footer_start = match.start()
-                        filtered_text = filtered_text[:footer_start]
-                        # Remove entities that fall in the footer area
-                        processed_entities = [
-                            e for e in processed_entities 
-                            if getattr(e, 'offset', 0) + getattr(e, 'length', 0) <= footer_start
-                        ]
-                except re.error as e:
-                    logger.warning(f"Invalid footer regex pattern {footer_pattern}: {e}")
+            footer_patterns = pair.filters.get("footer_regex", [])
+            if footer_patterns:
+                if isinstance(footer_patterns, str):
+                    footer_patterns = [footer_patterns]  
+                filtered_text = self._remove_footers(filtered_text, footer_patterns)
             
             # Process mentions with optional placeholders
             if pair.filters.get("remove_mentions", False):
@@ -217,10 +197,8 @@ class MessageFilter:
                 except re.error as e:
                     logger.warning(f"Invalid regex pattern {pattern}: {e}")
             
-            # Remove extra whitespace while preserving entities
-            filtered_text, processed_entities = self._normalize_whitespace_with_entities(
-                filtered_text, processed_entities
-            )
+            # Clean up excessive spaces while preserving newlines
+            filtered_text = self._clean_excessive_spaces(filtered_text)
             
             return filtered_text, processed_entities
             
@@ -581,6 +559,23 @@ class MessageFilter:
             logger.error(f"Error in regex replacement with entities: {e}")
             return text, entities or []
     
+    def _clean_excessive_spaces(self, text: str) -> str:
+        """Clean up excessive spaces while preserving newlines"""
+        if not text:
+            return text
+        
+        # Clean multiple spaces but preserve newlines
+        # Replace multiple spaces with single space
+        text = re.sub(r' +', ' ', text)
+        
+        # Clean up spaces around newlines
+        text = re.sub(r' *\n *', '\n', text)
+        
+        # Remove trailing spaces on lines
+        text = re.sub(r' +$', '', text, flags=re.MULTILINE)
+        
+        return text.strip()
+    
     def _normalize_whitespace_with_entities(self, text: str, entities: List) -> tuple[str, List]:
         """Normalize whitespace while preserving entity positions"""
         try:
@@ -825,7 +820,7 @@ class MessageFilter:
                 for pattern in patterns:
                     try:
                         # Compile with case-insensitive matching for flexibility
-                        compiled_pattern = re.compile(pattern, re.IGNORECASE | re.MULTILINE)
+                        compiled_pattern = re.compile(pattern, re.IGNORECASE)
                         
                         # Check if this line matches the header pattern
                         if compiled_pattern.match(line):
@@ -840,8 +835,11 @@ class MessageFilter:
                 if not line_removed:
                     filtered_lines.append(line)
             
-            # Rejoin lines and clean up
-            result_text = '\n'.join(filtered_lines).strip()
+            # Rejoin lines preserving original structure
+            result_text = '\n'.join(filtered_lines)
+            
+            # Clean up leading/trailing whitespace but preserve internal newlines
+            result_text = result_text.strip()
             
             # If result is empty or only whitespace, return original
             if not result_text or result_text.isspace():
@@ -907,8 +905,11 @@ class MessageFilter:
                 if line_removed:
                     break
             
-            # Rejoin lines and clean up
-            result_text = '\n'.join(filtered_lines).strip()
+            # Rejoin lines preserving original structure  
+            result_text = '\n'.join(filtered_lines)
+            
+            # Clean up leading/trailing whitespace but preserve internal newlines
+            result_text = result_text.strip()
             
             # If result is empty or only whitespace, return original
             if not result_text or result_text.isspace():
