@@ -5,7 +5,7 @@ channel = "stable-25_05"
 packages = ["freetype", "lcms2", "libimagequant", "libjpeg", "libtiff", "libwebp", "libxcrypt", "openjpeg", "openssl", "sqlite", "tcl", "tk", "zlib"]
 
 [workflows]
-runButton = "Project"
+runButton = "Start Bot System"
 
 [[workflows.workflow]]
 name = "Project"
@@ -31,6 +31,19 @@ args = "pip install python-telegram-bot telethon python-dotenv aiosqlite aiohttp
 [[workflows.workflow]]
 name = "Bot System"
 author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "python main.py"
+
+[[workflows.workflow]]
+name = "Start Bot System"
+author = 45480059
+mode = "sequential"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "python -c \"import asyncio; print('Asyncio support:', asyncio.get_event_loop()); import httpcore; print('httpcore version:', httpcore.__version__)\""
 
 [[workflows.workflow.tasks]]
 task = "shell.exec"

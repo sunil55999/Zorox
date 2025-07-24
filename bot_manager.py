@@ -17,6 +17,7 @@ import heapq
 from telegram import Bot, Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
 from telegram.error import RetryAfter, TelegramError, NetworkError, TimedOut, Forbidden, BadRequest
+from telegram.request import HTTPXRequest
 from telethon import TelegramClient, events
 from telethon.errors import FloodWaitError, AuthKeyUnregisteredError
 
@@ -139,35 +140,76 @@ class BotManager:
     async def _init_telegram_bots(self):
         """Initialize Telegram bot instances"""
         try:
+            # Import required modules with proper async support
+            from telegram.request import HTTPXRequest
+            
+            # Create a custom HTTP request handler with proper asyncio support
+            request = HTTPXRequest(
+                connection_pool_size=8,
+                read_timeout=30,
+                write_timeout=30,
+                connect_timeout=30,
+                pool_timeout=30
+            )
+            
             # Initialize admin bot first if configured
             if self.config.ADMIN_BOT_TOKEN:
-                self.admin_bot = Bot(token=self.config.ADMIN_BOT_TOKEN)
-                me = await self.admin_bot.get_me()
-                logger.info(f"Admin bot initialized: @{me.username}")
+                self.admin_bot = Bot(token=self.config.ADMIN_BOT_TOKEN, request=request)
+                
+                # Test admin bot connectivity with retry
+                max_retries = 3
+                for attempt in range(max_retries):
+                    try:
+                        me = await self.admin_bot.get_me()
+                        logger.info(f"Admin bot initialized: @{me.username}")
+                        break
+                    except Exception as e:
+                        if attempt == max_retries - 1:
+                            raise
+                        logger.warning(f"Admin bot connection attempt {attempt + 1} failed: {e}")
+                        await asyncio.sleep(2)
                 
                 # Create admin application for commands
-                self.admin_application = Application.builder().token(self.config.ADMIN_BOT_TOKEN).build()
+                self.admin_application = Application.builder().token(self.config.ADMIN_BOT_TOKEN).request(request).build()
                 await self._setup_command_handlers(self.admin_application)
                 logger.info("Admin bot command handlers configured")
             
             # Initialize message sending bots
             for i, token in enumerate(self.config.BOT_TOKENS):
                 try:
-                    bot = Bot(token=token)
+                    # Create bot with custom request handler
+                    bot = Bot(token=token, request=request)
                     
-                    # Test bot connectivity
-                    bot_info = await bot.get_me()
-                    logger.info(f"Bot {i} initialized: @{bot_info.username}")
+                    # Test bot connectivity with retry
+                    max_retries = 3
+                    for attempt in range(max_retries):
+                        try:
+                            bot_info = await bot.get_me()
+                            logger.info(f"Bot {i} initialized: @{bot_info.username}")
+                            break
+                        except Exception as e:
+                            if attempt == max_retries - 1:
+                                logger.error(f"Bot {i} failed after {max_retries} attempts: {e}")
+                                continue  # Skip this bot but continue with others
+                            logger.warning(f"Bot {i} connection attempt {attempt + 1} failed: {e}")
+                            await asyncio.sleep(2)
+                    else:
+                        # If all retries failed, skip this bot
+                        continue
                     
                     self.telegram_bots.append(bot)
                     
                     # Create application for message sending (no commands on these)
-                    app = Application.builder().token(token).build()
+                    app = Application.builder().token(token).request(request).build()
                     self.bot_applications.append(app)
                     
                 except Exception as e:
                     logger.error(f"Failed to initialize bot {i}: {e}")
                     # Continue with other bots
+            
+            if not self.telegram_bots:
+                raise ValueError("No Telegram bots could be initialized successfully")
+                
         except Exception as e:
             logger.error(f"Failed to initialize bots: {e}")
             raise
