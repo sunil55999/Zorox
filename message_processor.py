@@ -103,10 +103,9 @@ class MessageProcessor:
             
             # For URL messages without media, ensure webpage previews are enabled
             # This is crucial for proper URL forwarding
-            enable_webpage_preview = True
-            if processed_content and self._contains_urls(processed_content):
-                logger.info(f"Message contains URLs, ensuring webpage preview is enabled: {processed_content}")
-                enable_webpage_preview = True
+            contains_urls = processed_content and self._contains_urls(processed_content)
+            if contains_urls:
+                logger.info(f"Message contains URLs, will enable webpage preview: {processed_content[:200]}...")
             
             # Send message with full entity preservation and proper URL preview handling
             sent_message = await self._send_message(
@@ -174,12 +173,13 @@ class MessageProcessor:
             
             # Edit the destination message
             try:
+                contains_urls = self._contains_urls(processed_content)
                 await bot.edit_message_text(
                     chat_id=pair.destination_chat_id,
                     message_id=mapping.destination_message_id,
                     text=processed_content,
                     entities=processed_entities,
-                    disable_web_page_preview=False  # Always enable webpage previews
+                    disable_web_page_preview=not contains_urls  # Enable preview only for URLs
                 )
                 
                 # Update statistics
@@ -627,11 +627,15 @@ class MessageProcessor:
                 if content:
                     contains_urls = self._contains_urls(content)
                     logger.info(f"Sending text message. Contains URLs: {contains_urls}, Content: {content[:200]}...")
+                    
+                    # Explicitly disable web page preview only if no URLs are detected
+                    disable_preview = not contains_urls
+                    
                     return await bot.send_message(
                         chat_id=chat_id,
                         text=content,
                         entities=converted_entities,
-                        disable_web_page_preview=False,  # Always enable webpage previews for URLs
+                        disable_web_page_preview=disable_preview,  # Enable previews for URLs, disable for plain text
                         reply_to_message_id=reply_to_message_id
                     )
             
@@ -666,12 +670,13 @@ class MessageProcessor:
                     elif media_type == 'sticker':
                         return await bot.send_sticker(chat_id=chat_id, sticker=media_info['data'], reply_to_message_id=reply_to_message_id)
                 else:
-                    # Final fallback: plain text without entities, enable URL previews
+                    # Final fallback: plain text without entities, check for URLs
+                    contains_urls = self._contains_urls(content)
                     return await bot.send_message(
                         chat_id=chat_id, 
                         text=content, 
                         reply_to_message_id=reply_to_message_id, 
-                        disable_web_page_preview=False
+                        disable_web_page_preview=not contains_urls  # Enable preview only if URLs detected
                     )
             except Exception as fallback_error:
                 logger.error(f"All fallback attempts failed: {fallback_error}")
@@ -974,19 +979,19 @@ class MessageProcessor:
             return False
         
         import re
-        # URL patterns that typically generate webpage previews
+        # Enhanced URL patterns that typically generate webpage previews
         url_patterns = [
-            r'https?://[^\s<>"]+',                    # HTTP/HTTPS URLs
-            r'www\.[^\s<>"]+\.[a-zA-Z]{2,}',         # www URLs with domain
-            r't\.me/[^\s<>"]+',                      # Telegram links
-            r'[a-zA-Z0-9-]+\.[a-zA-Z]{2,}/[^\s<>"]*', # Domain.com/path URLs
-            r'ftp://[^\s<>"]+',                      # FTP URLs
-            r'[a-zA-Z0-9.-]+\.(com|org|net|edu|gov|co|io|tv|me|ly|to|cc)/[^\s<>"]*', # Common TLD URLs
+            r'https?://[^\s<>"]+',                          # HTTP/HTTPS URLs
+            r'www\.[^\s<>"]+\.[a-zA-Z]{2,}[^\s<>"]*',      # www URLs with domain and optional path
+            r't\.me/[^\s<>"]+',                             # Telegram links
+            r'[a-zA-Z0-9.-]+\.(com|org|net|edu|gov|co|io|tv|me|ly|to|cc|repl|dev)[^\s<>"]*', # Common TLD URLs with paths
+            r'ftp://[^\s<>"]+',                             # FTP URLs
+            r'[a-zA-Z0-9.-]+\.replit\.com[^\s<>"]*',        # Replit URLs
         ]
         
         for pattern in url_patterns:
             if re.search(pattern, text, re.IGNORECASE):
-                logger.debug(f"Found URL pattern '{pattern}' in text: {text[:100]}...")
+                logger.info(f"Found URL pattern in text: {text[:200]}...")
                 return True
         
         return False

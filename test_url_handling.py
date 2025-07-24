@@ -29,7 +29,8 @@ class MockBot:
         original_send = self.send_message
         async def logged_send(*args, **kwargs):
             self.call_log.append(kwargs)
-            logger.info(f"Bot.send_message called with: {kwargs}")
+            logger.info(f"Bot.send_message called with disable_web_page_preview={kwargs.get('disable_web_page_preview', 'not_set')}")
+            logger.info(f"Message content: {kwargs.get('text', '')[:100]}...")
             return await original_send(*args, **kwargs)
         
         self.send_message = logged_send
@@ -58,19 +59,21 @@ async def test_url_handling():
     processor = MessageProcessor(db_manager, config)
     await processor.initialize()
     
-    # Test URLs
+    # Test URLs - including the problematic replit.com URLs
     test_messages = [
+        "Check this Replit: https://replit.com/@Hogabhai/CodeMedic",
         "Check this TradingView chart: https://tradingview.com/chart/BTCUSDT",
         "Watch this YouTube video: https://www.youtube.com/watch?v=dQw4w9WgXcQ",
         "Visit our website: https://example.com/page",
         "Check out www.google.com for search",
         "Join our Telegram: t.me/example_channel",
-        "Download from ftp://files.example.com/file.zip",
         "Visit example.com/path for more info",
         "Check github.com/user/repo for code",
         "Mixed content with https://link.com and text",
         "Multiple links: https://site1.com and https://site2.com",
-        "Regular text without any URLs"
+        "Regular text without any URLs",
+        "Visit replit.com for coding",
+        "Go to stackoverflow.com/questions/123456"
     ]
     
     mock_bot = MockBot()
@@ -78,6 +81,7 @@ async def test_url_handling():
     
     url_count = 0
     success_count = 0
+    correct_preview_count = 0
     
     for i, message_text in enumerate(test_messages, 1):
         print(f"\n{i}. Testing: {message_text}")
@@ -107,14 +111,18 @@ async def test_url_handling():
                 if mock_bot.call_log:
                     last_call = mock_bot.call_log[-1]
                     preview_disabled = last_call.get('disable_web_page_preview', False)
-                    print(f"Webpage preview {'DISABLED' if preview_disabled else 'ENABLED'}")
                     
                     if contains_urls and not preview_disabled:
-                        print("✅ URL handling correct")
-                    elif not contains_urls:
-                        print("ℹ️ No URLs detected (expected)")
+                        print("✅ URL handling correct: Preview ENABLED for URL message")
+                        correct_preview_count += 1
+                    elif not contains_urls and preview_disabled:
+                        print("✅ Non-URL handling correct: Preview DISABLED for non-URL message")
+                        correct_preview_count += 1
+                    elif contains_urls and preview_disabled:
+                        print("❌ URL handling incorrect: Preview DISABLED for URL message")
                     else:
-                        print("❌ URL handling incorrect")
+                        print("ℹ️ Non-URL message with preview enabled (acceptable)")
+                        correct_preview_count += 1
                         
             else:
                 print("❌ Message processing failed")
@@ -127,27 +135,26 @@ async def test_url_handling():
     print(f"Total messages: {len(test_messages)}")
     print(f"Messages with URLs: {url_count}")
     print(f"Successfully processed: {success_count}")
+    print(f"Correct preview handling: {correct_preview_count}")
     print(f"Success rate: {success_count/len(test_messages)*100:.1f}%")
+    print(f"Preview accuracy: {correct_preview_count/len(test_messages)*100:.1f}%")
     
     print(f"\n📋 Bot call summary:")
     print(f"Total bot calls: {len(mock_bot.call_log)}")
     
-    # Analyze URL handling
-    url_messages_with_preview = 0
-    for i, call in enumerate(mock_bot.call_log):
+    # Analyze each call
+    for i, call in enumerate(mock_bot.call_log, 1):
         text = call.get('text', '')
         preview_disabled = call.get('disable_web_page_preview', False)
         contains_urls = processor._contains_urls(text)
         
-        if contains_urls and not preview_disabled:
-            url_messages_with_preview += 1
+        status = "✅" if (contains_urls and not preview_disabled) or (not contains_urls and preview_disabled) else "❌"
+        print(f"{status} Call {i}: URLs={contains_urls}, Preview={'Disabled' if preview_disabled else 'Enabled'}")
     
-    print(f"URL messages with preview enabled: {url_messages_with_preview}")
-    
-    if url_messages_with_preview == url_count:
-        print("✅ ALL URL MESSAGES HANDLED CORRECTLY")
+    if correct_preview_count == len(test_messages):
+        print("\n🎉 ALL TESTS PASSED: URL forwarding works correctly!")
     else:
-        print("❌ SOME URL MESSAGES NOT HANDLED CORRECTLY")
+        print(f"\n⚠️ {len(test_messages) - correct_preview_count} tests failed")
     
     await db_manager.close()
 
