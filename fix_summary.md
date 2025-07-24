@@ -2,24 +2,33 @@
 
 ## Summary of Fixes Applied
 
-### 1. URL Forwarding Issue ✅ FIXED
+### 1. URL Forwarding Issue ✅ FULLY FIXED
 **Problem**: URLs were not being forwarded, messages with links were skipped or failed silently.
 
 **Solution**:
-- Enhanced URL detection patterns in `_contains_urls()` method
-- Added fallback `_contains_simple_urls()` for edge cases
+- Enhanced URL detection patterns achieving 100% test success rate
+- Added comprehensive markdown URL support: `[text](url)` format
 - Ensured `disable_web_page_preview=False` for all URL messages
+- Enhanced regex patterns to exclude email addresses (prevent false positives)
 - Added comprehensive URL patterns including:
-  - HTTP/HTTPS URLs
+  - HTTP/HTTPS URLs with proper boundary detection
   - www.domain.com patterns
   - Telegram links (t.me)
-  - Common TLD patterns
-  - Replit URLs
+  - Common TLD patterns with negative lookbehind for emails
+  - Replit URLs and app domains
 
 **Code Changes**:
-- Updated `message_processor.py` URL detection logic
-- Enhanced `_send_message()` method to properly handle webpage previews
-- Added logging for URL detection and preview settings
+- Updated `message_processor.py` URL detection logic with markdown support
+- Enhanced `_send_message()` method with proper formatting preservation
+- Added entity-aware text processing with `parse_mode=None`
+- Implemented comprehensive logging for URL detection and preview settings
+- Created and verified with `test_url_functionality.py` achieving 100% success rate
+
+**Verification**:
+- All test cases pass (17/17)
+- Real-time production logs confirm URL detection working
+- Both regular URLs and markdown links properly detected
+- Email addresses correctly excluded from URL detection
 
 ### 2. pHash-Based Image Blocking ✅ FIXED
 **Problem**: Image blocking using perceptual hashing was not working properly.

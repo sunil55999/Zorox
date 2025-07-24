@@ -107,22 +107,28 @@ class MessageFilter:
                 self.filter_stats.forward_filtered += 1
                 return FilterResult(False, "Forwarded message blocked", filters_applied)
             
-            # Check if links are blocked
+            # Check if links are blocked (BUT allow URLs for webpage preview functionality)
+            # NOTE: This should typically be False to allow URL forwarding with previews
             if pair.filters.get("block_links", False) and self._contains_links(text):
                 filters_applied.append("block_links")
                 self.filter_stats.link_filtered += 1
+                logger.warning(f"URL message blocked by block_links filter: {text[:100]}... (Consider disabling block_links for URL forwarding)")
                 return FilterResult(False, "Contains blocked links", filters_applied)
             
             # Check media type restrictions
             if event.media:
                 allowed_media = pair.filters.get("allowed_media_types", [
-                    "photo", "video", "document", "audio", "voice"
+                    "photo", "video", "document", "audio", "voice", "animation", "video_note", "sticker", "webpage", "unknown"
                 ])
                 media_type = self._get_media_type(event.media)
                 
-                if media_type not in allowed_media:
+                # Special handling for URL messages with webpage media - these should always be allowed for URL forwarding
+                if media_type == "webpage" or media_type == "unknown":
+                    logger.info(f"Allowing webpage/unknown media type for URL forwarding: {media_type}")
+                elif media_type not in allowed_media:
                     filters_applied.append("media_type")
                     self.filter_stats.media_filtered += 1
+                    return FilterResult(False, f"Media type not allowed: {media_type}", filters_applied)
                     return FilterResult(False, f"Media type not allowed: {media_type}", filters_applied)
             
             # Check time-based filters

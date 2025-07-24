@@ -55,7 +55,7 @@ class MessageProcessor:
             # Check global word blocking first
             message_text = event.text or event.raw_text or ""
             if self.is_blocked_word(message_text):
-                logger.debug("Message blocked: contains global blocked words")
+                logger.info(f"Message blocked by global word filter: {message_text[:100]}...")
                 self.stats['messages_filtered'] += 1
                 pair.stats['messages_filtered'] = pair.stats.get('messages_filtered', 0) + 1
                 pair.stats['words_blocked'] = pair.stats.get('words_blocked', 0) + 1
@@ -65,7 +65,7 @@ class MessageProcessor:
             # Apply other filters
             filter_result = await self.message_filter.should_copy_message(event, pair)
             if not filter_result.should_copy:
-                logger.debug(f"Message filtered: {filter_result.reason}")
+                logger.info(f"Message filtered by {filter_result.filters_applied}: {filter_result.reason} - Content: {message_text[:100]}...")
                 self.stats['messages_filtered'] += 1
                 
                 # Update pair stats
@@ -174,15 +174,18 @@ class MessageProcessor:
             if not processed_content:
                 return False
             
-            # Edit the destination message
+            # Edit the destination message - ensure URLs are handled properly
             try:
                 contains_urls = self._contains_urls(processed_content)
+                logger.info(f"Editing message with URLs: {contains_urls}, Content: {processed_content[:100]}...")
+                
                 await bot.edit_message_text(
                     chat_id=pair.destination_chat_id,
                     message_id=mapping.destination_message_id,
                     text=processed_content,
                     entities=processed_entities,
-                    disable_web_page_preview=not contains_urls  # Enable preview only for URLs
+                    disable_web_page_preview=not contains_urls,  # Enable preview only for URLs
+                    parse_mode=None  # Use entities to preserve formatting
                 )
                 
                 # Update statistics
@@ -631,19 +634,21 @@ class MessageProcessor:
                     contains_urls = self._contains_urls(content)
                     logger.info(f"Sending text message. Contains URLs: {contains_urls}, Content: {content[:200]}...")
                     
-                    # Enable web page preview for URLs, disable for plain text
+                    # For messages with URLs, ensure webpage preview is enabled
                     # disable_web_page_preview=False means preview is ENABLED
                     # disable_web_page_preview=True means preview is DISABLED
                     disable_preview = not contains_urls  # False if URLs present (preview enabled), True if no URLs (preview disabled)
                     
                     logger.info(f"Setting disable_web_page_preview={disable_preview} for message with URLs={contains_urls}")
                     
+                    # Send as text message (never as media) to ensure formatting is preserved and URLs work properly
                     return await bot.send_message(
                         chat_id=chat_id,
                         text=content,
                         entities=converted_entities,
                         disable_web_page_preview=disable_preview,
-                        reply_to_message_id=reply_to_message_id
+                        reply_to_message_id=reply_to_message_id,
+                        parse_mode=None  # Use entities instead of parse_mode to preserve original formatting
                     )
             
             return None
@@ -681,11 +686,14 @@ class MessageProcessor:
                     contains_urls = self._contains_urls(content)
                     disable_preview = not contains_urls
                     logger.info(f"Fallback: Setting disable_web_page_preview={disable_preview} for URLs={contains_urls}")
+                    
+                    # Ensure fallback also sends as text message with URL preview capability
                     return await bot.send_message(
                         chat_id=chat_id, 
                         text=content, 
                         reply_to_message_id=reply_to_message_id, 
-                        disable_web_page_preview=disable_preview
+                        disable_web_page_preview=disable_preview,
+                        parse_mode=None  # No parse mode to avoid formatting conflicts
                     )
             except Exception as fallback_error:
                 logger.error(f"All fallback attempts failed: {fallback_error}")
@@ -1005,15 +1013,27 @@ class MessageProcessor:
         import re
         # Enhanced URL patterns that typically generate webpage previews
         url_patterns = [
-            r'https?://[^\s<>"]+',                          # HTTP/HTTPS URLs
-            r'www\.[^\s<>"]+\.[a-zA-Z]{2,}[^\s<>"]*',      # www URLs with domain and optional path
-            r't\.me/[^\s<>"]+',                             # Telegram links
-            r'[a-zA-Z0-9.-]+\.(com|org|net|edu|gov|co|io|tv|me|ly|to|cc|repl|dev|app)[^\s<>"]*', # Common TLD URLs with paths
-            r'ftp://[^\s<>"]+',                             # FTP URLs
-            r'[a-zA-Z0-9.-]+\.replit\.com[^\s<>"]*',        # Replit URLs
-            r'[a-zA-Z0-9.-]+\.replit\.app[^\s<>"]*',        # Replit app URLs
+            r'https?://[^\s<>")\]]+',                       # HTTP/HTTPS URLs (exclude ) and ])
+            r'www\.[^\s<>")\]]+\.[a-zA-Z]{2,}[^\s<>")\]]*', # www URLs with domain and optional path
+            r't\.me/[^\s<>")\]]+',                          # Telegram links
+            r'(?<![a-zA-Z0-9@])[a-zA-Z0-9.-]+\.(com|org|net|edu|gov|co|io|tv|me|ly|to|cc|repl|dev|app)[^\s<>")\]]*', # Common TLD URLs (exclude emails)
+            r'ftp://[^\s<>")\]]+',                          # FTP URLs
+            r'[a-zA-Z0-9.-]+\.replit\.com[^\s<>")\]]*',     # Replit URLs
+            r'[a-zA-Z0-9.-]+\.replit\.app[^\s<>")\]]*',     # Replit app URLs
         ]
         
+        # Check for markdown-style links: [text](url)
+        markdown_link_pattern = r'\[([^\]]+)\]\(([^)]+)\)'
+        markdown_matches = re.findall(markdown_link_pattern, text)
+        if markdown_matches:
+            for link_text, link_url in markdown_matches:
+                # Check if the URL part contains a valid URL
+                for pattern in url_patterns:
+                    if re.search(pattern, link_url, re.IGNORECASE):
+                        logger.info(f"Found markdown URL in text: [{link_text}]({link_url})")
+                        return True
+        
+        # Check for regular URL patterns
         for pattern in url_patterns:
             match = re.search(pattern, text, re.IGNORECASE)
             if match:
@@ -1034,6 +1054,16 @@ class MessageProcessor:
             r'[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}(/[^\s]*)?',     # Basic domain.tld pattern
             r'(?:^|\s)([\w.-]+\.[\w]{2,})(?:\s|$)',        # Domain at word boundaries
         ]
+        
+        # Also check inside markdown links
+        markdown_link_pattern = r'\[([^\]]+)\]\(([^)]+)\)'
+        markdown_matches = re.findall(markdown_link_pattern, text)
+        if markdown_matches:
+            for link_text, link_url in markdown_matches:
+                for pattern in simple_patterns:
+                    if re.search(pattern, link_url, re.IGNORECASE):
+                        logger.info(f"Found simple URL in markdown: [{link_text}]({link_url})")
+                        return True
         
         for pattern in simple_patterns:
             if re.search(pattern, text, re.IGNORECASE):
