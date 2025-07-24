@@ -25,6 +25,7 @@ class MessagePair:
     name: str
     status: str = "active"
     assigned_bot_index: int = 0
+    bot_token_id: Optional[int] = None
     filters: Dict[str, Any] = field(default_factory=dict)
     stats: Dict[str, Any] = field(default_factory=dict)
     created_at: Optional[str] = None
@@ -308,9 +309,10 @@ class DatabaseManager:
                         name=row[3],
                         status=row[4],
                         assigned_bot_index=row[5],
-                        filters=json.loads(row[6]) if row[6] else {},
-                        stats=json.loads(row[7]) if row[7] else {},
-                        created_at=row[8]
+                        bot_token_id=row[6],
+                        filters=json.loads(row[7]) if row[7] else {},
+                        stats=json.loads(row[8]) if row[8] else {},
+                        created_at=row[9]
                     )
         except Exception as e:
             logger.error(f"Failed to get pair {pair_id}: {e}")
@@ -334,9 +336,10 @@ class DatabaseManager:
                         name=row[3],
                         status=row[4],
                         assigned_bot_index=row[5],
-                        filters=json.loads(row[6]) if row[6] else {},
-                        stats=json.loads(row[7]) if row[7] else {},
-                        created_at=row[8]
+                        bot_token_id=row[6],
+                        filters=json.loads(row[7]) if row[7] else {},
+                        stats=json.loads(row[8]) if row[8] else {},
+                        created_at=row[9]
                     ))
         except Exception as e:
             logger.error(f"Failed to get pairs: {e}")
@@ -348,11 +351,11 @@ class DatabaseManager:
             async with self.get_connection() as conn:
                 await conn.execute('''
                     UPDATE pairs SET
-                        name = ?, status = ?, assigned_bot_index = ?,
+                        name = ?, status = ?, assigned_bot_index = ?, bot_token_id = ?,
                         filters = ?, stats = ?
                     WHERE id = ?
                 ''', (
-                    pair.name, pair.status, pair.assigned_bot_index,
+                    pair.name, pair.status, pair.assigned_bot_index, pair.bot_token_id,
                     json.dumps(pair.filters), json.dumps(pair.stats), pair.id
                 ))
                 await conn.commit()

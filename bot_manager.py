@@ -309,9 +309,13 @@ class BotManager:
         
         # Bot token management commands
         app.add_handler(CommandHandler("addtoken", self._cmd_add_token))
+        app.add_handler(CommandHandler("addbot", self._cmd_add_token))  # Alias for addtoken
         app.add_handler(CommandHandler("listtokens", self._cmd_list_tokens))
+        app.add_handler(CommandHandler("listbots", self._cmd_list_tokens))  # Alias for listtokens
         app.add_handler(CommandHandler("deletetoken", self._cmd_delete_token))
+        app.add_handler(CommandHandler("deletebot", self._cmd_delete_token))  # Alias for deletetoken
         app.add_handler(CommandHandler("toggletoken", self._cmd_toggle_token))
+        app.add_handler(CommandHandler("togglebot", self._cmd_toggle_token))  # Alias for toggletoken
         
         app.add_handler(CallbackQueryHandler(self._handle_callback))
     
@@ -801,7 +805,7 @@ System Management:
 
 Pair Management:
 /pairs - List all message pairs
-/addpair <source> <dest> <name> - Add new pair
+/addpair <source> <dest> <name> [bot_token_id] - Add new pair with optional bot selection
 /delpair <id> - Delete pair
 /editpair <id> <setting> <value> - Edit pair settings
 /pairinfo <id> - Detailed pair information
@@ -844,9 +848,13 @@ Utilities:
 
 Bot Token Management:
 /addtoken <name> <token> - Add new bot token
+/addbot <name> <token> - Add new bot token (alias)
 /listtokens [--all] - List bot tokens
+/listbots [--all] - List bot tokens (alias)  
 /deletetoken <token_id> - Delete bot token
+/deletebot <token_id> - Delete bot token (alias)
 /toggletoken <token_id> - Enable/disable bot token
+/togglebot <token_id> - Enable/disable bot token (alias)
 
 Features:
 ✅ Multi-bot support with load balancing
@@ -952,7 +960,18 @@ Features:
                 status_emoji = "✅" if pair.status == "active" else "❌"
                 pairs_text += f"{status_emoji} **{pair.name}** (ID: {pair.id})\n"
                 pairs_text += f"   {pair.source_chat_id} → {pair.destination_chat_id}\n"
-                pairs_text += f"   Bot: {pair.assigned_bot_index}, Messages: {pair.stats.get('messages_copied', 0)}\n\n"
+                
+                # Show bot token information if available
+                bot_info = f"Bot: {pair.assigned_bot_index}"
+                if pair.bot_token_id:
+                    try:
+                        token = await self.db_manager.get_bot_token_by_id(pair.bot_token_id)
+                        if token:
+                            bot_info = f"Bot: {token['name']} (@{token['username']}, ID: {pair.bot_token_id})"
+                    except:
+                        bot_info = f"Bot: Token ID {pair.bot_token_id} (not found)"
+                
+                pairs_text += f"   {bot_info}, Messages: {pair.stats.get('messages_copied', 0)}\n\n"
             
             if len(self.pairs) > 10:
                 pairs_text += f"... and {len(self.pairs) - 10} more pairs"
@@ -1192,6 +1211,18 @@ Features:
             
             pair = self.pairs[pair_id]
             
+            # Get bot token information if available
+            bot_info = f"Assigned Bot: {pair.assigned_bot_index}"
+            if pair.bot_token_id:
+                try:
+                    token = await self.db_manager.get_bot_token_by_id(pair.bot_token_id)
+                    if token:
+                        bot_info = f"Bot Token: {token['name']} (@{token['username']}, ID: {pair.bot_token_id})"
+                    else:
+                        bot_info = f"Bot Token: ID {pair.bot_token_id} (not found)"
+                except Exception:
+                    bot_info = f"Bot Token: ID {pair.bot_token_id} (error loading)"
+            
             info_text = f"""
 📋 **Pair Information - {pair.name}**
 
@@ -1200,7 +1231,7 @@ Features:
 • Status: {pair.status}
 • Source: {pair.source_chat_id}
 • Destination: {pair.destination_chat_id}
-• Assigned Bot: {pair.assigned_bot_index}
+• {bot_info}
 
 **Statistics:**
 • Messages Copied: {pair.stats.get('messages_copied', 0)}

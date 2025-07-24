@@ -165,6 +165,35 @@ The system follows a modular, async-first architecture with clear separation of 
 
 ## Recent Changes
 
+### 2025-07-24: BOT MANAGEMENT SYSTEM ENHANCEMENTS - COMPLETED ✅
+- ✅ **Add Bot Command Implementation**: Added `/addbot` command as alias for `/addtoken` for intuitive bot token management
+  - Users can now use `/addbot <name> <token>` or `/addtoken <name> <token>` interchangeably
+  - Added comprehensive bot management aliases: `/listbots`, `/deletebot`, `/togglebot`
+  - Updated help system to show all bot management command options and aliases
+- ✅ **Enhanced Pair Creation with Bot Selection**: Updated `/addpair` command to support specific bot token assignment
+  - Usage: `/addpair <source_chat_id> <dest_chat_id> <name> [bot_token_id]`
+  - Optional bot_token_id parameter allows selecting which saved bot token to use for each pair
+  - Automatic validation ensures only active bot tokens can be assigned to pairs
+  - Backward compatibility maintained - pairs without bot_token_id use default bot assignment
+- ✅ **Improved Pair Display**: Enhanced pair listing to show bot token information
+  - `/pairs` command now displays which bot token is assigned to each pair
+  - Shows bot name, username, and token ID for pairs with specific bot assignments
+  - Fallback to showing bot index for pairs using default assignment system
+- ✅ **Enhanced Pair Information**: Updated `/pairinfo` command to include detailed bot token information
+  - Shows complete bot token details including name, username, and token ID
+  - Graceful error handling for missing or invalid bot token references
+  - Clear distinction between bot index assignment and bot token assignment
+- ✅ **Database Schema Updates**: Enhanced database structure to support bot token assignment per pair
+  - Added bot_token_id column to pairs table with foreign key reference to bot_tokens table
+  - Updated MessagePair dataclass to include bot_token_id field
+  - Enhanced database queries to properly load and save bot token assignments
+  - Maintained backward compatibility with existing pairs in database
+- ✅ **System Status**: Bot management system fully operational with comprehensive token management
+  - All bot token CRUD operations working (create, read, update, delete, toggle)
+  - Pair creation with bot selection working and validated
+  - Database relationships properly established and functioning
+  - Command aliases implemented and available for user convenience
+
 ### 2025-07-24: HEADER/FOOTER REMOVAL SYSTEM VERIFIED WORKING - COMPLETED ✅
 - ✅ **System Confirmed Operational**: Comprehensive live system testing proves header/footer removal working perfectly
   - Live test: 12-line message → 8-line clean signal (header + footer + mentions removed)
