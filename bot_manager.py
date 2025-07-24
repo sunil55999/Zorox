@@ -369,6 +369,11 @@ class BotManager:
             if chat_id not in self.source_to_pairs:
                 return
             
+            # Log URL messages for debugging
+            message_text = event.text or event.raw_text or ""
+            if self.message_processor._contains_urls(message_text):
+                logger.info(f"New URL message received: {message_text[:100]}...")
+            
             # Process message for each pair
             for pair_id in self.source_to_pairs[chat_id]:
                 pair = self.pairs.get(pair_id)

@@ -105,7 +105,7 @@ class MessageProcessor:
             # This is crucial for proper URL forwarding
             enable_webpage_preview = True
             if processed_content and self._contains_urls(processed_content):
-                logger.debug(f"Message contains URLs, ensuring webpage preview is enabled")
+                logger.info(f"Message contains URLs, ensuring webpage preview is enabled: {processed_content}")
                 enable_webpage_preview = True
             
             # Send message with full entity preservation and proper URL preview handling
@@ -238,14 +238,18 @@ class MessageProcessor:
             text = event.raw_text or event.text or ""
             entities = getattr(event, 'entities', []) or []
             
+            logger.debug(f"Processing message content: {text[:100]}... (entities: {len(entities)})")
+            
             # Skip text processing if filters are disabled to preserve original formatting
             if pair.filters.get("preserve_original_formatting", True):
                 # Only apply essential filters while preserving entities
                 filtered_text = text
                 processed_entities = self._convert_entities_for_telegram(entities) if entities else []
+                logger.debug(f"Preserved original formatting. Text length: {len(filtered_text)}")
             else:
                 # Apply text filters with entity preservation
                 filtered_text, processed_entities = await self.message_filter.filter_text(text, pair, entities)
+                logger.debug(f"Applied text filters. Text length: {len(filtered_text)}")
             
             # Check length limits
             min_length = pair.filters.get("min_message_length", 0)
@@ -621,7 +625,8 @@ class MessageProcessor:
             else:
                 # Send text message with enhanced formatting support and URL preview handling
                 if content:
-                    logger.debug(f"Sending text message with URL preview enabled: {self._contains_urls(content)}")
+                    contains_urls = self._contains_urls(content)
+                    logger.info(f"Sending text message. Contains URLs: {contains_urls}, Content: {content[:200]}...")
                     return await bot.send_message(
                         chat_id=chat_id,
                         text=content,
@@ -971,13 +976,17 @@ class MessageProcessor:
         import re
         # URL patterns that typically generate webpage previews
         url_patterns = [
-            r'https?://[^\s<>"]+',  # HTTP/HTTPS URLs
-            r'www\.[^\s<>"]+',      # www URLs
-            r't\.me/[^\s<>"]+',     # Telegram links
+            r'https?://[^\s<>"]+',                    # HTTP/HTTPS URLs
+            r'www\.[^\s<>"]+\.[a-zA-Z]{2,}',         # www URLs with domain
+            r't\.me/[^\s<>"]+',                      # Telegram links
+            r'[a-zA-Z0-9-]+\.[a-zA-Z]{2,}/[^\s<>"]*', # Domain.com/path URLs
+            r'ftp://[^\s<>"]+',                      # FTP URLs
+            r'[a-zA-Z0-9.-]+\.(com|org|net|edu|gov|co|io|tv|me|ly|to|cc)/[^\s<>"]*', # Common TLD URLs
         ]
         
         for pattern in url_patterns:
             if re.search(pattern, text, re.IGNORECASE):
+                logger.debug(f"Found URL pattern '{pattern}' in text: {text[:100]}...")
                 return True
         
         return False
