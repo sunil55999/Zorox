@@ -84,38 +84,38 @@ class MessageMapping:
 
 class DatabaseManager:
     """Production-ready database manager with async support"""
-    
+
     def __init__(self, db_path: str = "bot.db"):
         self.db_path = db_path
         self.backup_path = f"{db_path}.backup"
         self._connection_pool = []
         self._pool_size = 5
-        
+
     async def initialize(self):
         """Initialize database with complete schema"""
         try:
             # Create database directory if needed
             os.makedirs(os.path.dirname(self.db_path) if os.path.dirname(self.db_path) else '.', exist_ok=True)
-            
+
             # Initialize schema
             await self._init_schema()
-            
+
             # Create backup
             await self._create_backup()
-            
+
             logger.info(f"Database initialized: {self.db_path}")
-            
+
         except Exception as e:
             logger.error(f"Failed to initialize database: {e}")
             raise
-    
+
     async def _init_schema(self):
         """Initialize complete database schema"""
         async with aiosqlite.connect(self.db_path) as conn:
             # Enable foreign keys and WAL mode
             await conn.execute("PRAGMA foreign_keys = ON")
             await conn.execute("PRAGMA journal_mode = WAL")
-            
+
             # Pairs table
             await conn.execute('''
                 CREATE TABLE IF NOT EXISTS pairs (
@@ -219,7 +219,7 @@ class DatabaseManager:
                 'CREATE INDEX IF NOT EXISTS idx_pairs_status ON pairs(status)',
                 'CREATE INDEX IF NOT EXISTS idx_pairs_bot ON pairs(assigned_bot_index)'
             ]
-            
+
             for index_sql in indexes:
                 await conn.execute(index_sql)
 
@@ -232,7 +232,7 @@ class DatabaseManager:
                 ('auto_backup_enabled', 'true'),
                 ('maintenance_mode', 'false')
             ]
-            
+
             for key, value in default_settings:
                 await conn.execute(
                     'INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)',
@@ -241,7 +241,7 @@ class DatabaseManager:
 
             await conn.commit()
             logger.debug("Database schema initialized")
-    
+
     @asynccontextmanager
     async def get_connection(self):
         """Get database connection from pool"""
@@ -251,7 +251,7 @@ class DatabaseManager:
             yield conn
         finally:
             await conn.close()
-    
+
     async def create_pair(self, source_chat_id: int, destination_chat_id: int,
                          name: str, bot_index: int = 0) -> int:
         """Create new message pair"""
@@ -267,10 +267,10 @@ class DatabaseManager:
                 ))
                 pair_id = cursor.lastrowid
                 await conn.commit()
-                
+
                 logger.info(f"Created pair {pair_id}: {name} ({source_chat_id} -> {destination_chat_id})")
                 return pair_id
-                
+
         except sqlite3.IntegrityError:
             raise ValueError(f"Pair already exists: {source_chat_id} -> {destination_chat_id}")
         except Exception as e:
@@ -283,7 +283,7 @@ class DatabaseManager:
             async with self.get_connection() as conn:
                 cursor = await conn.execute('SELECT * FROM pairs WHERE id = ?', (pair_id,))
                 row = await cursor.fetchone()
-                
+
                 if row:
                     return MessagePair(
                         id=row[0],
@@ -385,7 +385,7 @@ class DatabaseManager:
                     WHERE source_message_id = ? AND pair_id = ?
                 ''', (source_message_id, pair_id))
                 row = await cursor.fetchone()
-                
+
                 if row:
                     return MessageMapping(*row)
         except Exception as e:
@@ -407,28 +407,28 @@ class DatabaseManager:
             logger.error(f"Failed to log error: {e}")
 
     async def get_setting(self, key: str, default: str = None) -> Optional[str]:
-        """Get system setting"""
+        """Get a setting value"""
         try:
-            async with self.get_connection() as conn:
-                cursor = await conn.execute('SELECT value FROM settings WHERE key = ?', (key,))
-                row = await cursor.fetchone()
-                return row[0] if row else default
+            async with aiosqlite.connect(self.db_path) as db:
+                cursor = await db.execute(
+                    "SELECT value FROM settings WHERE key = ?", (key,)
+                )
+                result = await cursor.fetchone()
+                return result[0] if result else default
         except Exception as e:
-            logger.error(f"Failed to get setting {key}: {e}")
+            logger.error(f"Error getting setting {key}: {e}")
             return default
 
-    async def set_setting(self, key: str, value: str):
-        """Set system setting"""
+    async def get_all_settings(self) -> Dict[str, str]:
+        """Get all settings"""
         try:
-            async with self.get_connection() as conn:
-                await conn.execute('''
-                    INSERT OR REPLACE INTO settings (key, value, updated_at)
-                    VALUES (?, ?, CURRENT_TIMESTAMP)
-                ''', (key, value))
-                await conn.commit()
+            async with aiosqlite.connect(self.db_path) as db:
+                cursor = await db.execute("SELECT key, value FROM settings")
+                results = await cursor.fetchall()
+                return {row[0]: row[1] for row in results}
         except Exception as e:
-            logger.error(f"Failed to set setting {key}: {e}")
-            raise
+            logger.error(f"Error getting all settings: {e}")
+            return {}
 
     async def _create_backup(self):
         """Create database backup"""
@@ -443,7 +443,7 @@ class DatabaseManager:
         """Clean up old data"""
         try:
             cutoff_date = (datetime.now() - timedelta(days=days)).isoformat()
-            
+
             async with self.get_connection() as conn:
                 # Clean old error logs
                 cursor = await conn.execute(
@@ -451,7 +451,7 @@ class DatabaseManager:
                     (cutoff_date,)
                 )
                 deleted_errors = cursor.rowcount
-                
+
                 # Clean old message mappings for inactive pairs
                 cursor = await conn.execute('''
                     DELETE FROM message_mapping 
@@ -460,10 +460,10 @@ class DatabaseManager:
                     )
                 ''', (cutoff_date,))
                 deleted_mappings = cursor.rowcount
-                
+
                 await conn.commit()
                 logger.info(f"Cleaned up data older than {days} days: {deleted_errors} errors, {deleted_mappings} mappings")
-                
+
         except Exception as e:
             logger.error(f"Failed to cleanup old data: {e}")
 
@@ -472,18 +472,18 @@ class DatabaseManager:
         try:
             async with self.get_connection() as conn:
                 stats = {}
-                
+
                 # Pair counts
                 cursor = await conn.execute('SELECT COUNT(*) FROM pairs')
                 stats['total_pairs'] = (await cursor.fetchone())[0]
-                
+
                 cursor = await conn.execute('SELECT COUNT(*) FROM pairs WHERE status = "active"')
                 stats['active_pairs'] = (await cursor.fetchone())[0]
-                
+
                 # Message counts
                 cursor = await conn.execute('SELECT COUNT(*) FROM message_mapping')
                 stats['total_messages'] = (await cursor.fetchone())[0]
-                
+
                 # Recent activity (last 24 hours)
                 yesterday = (datetime.now() - timedelta(days=1)).isoformat()
                 cursor = await conn.execute(
@@ -491,18 +491,18 @@ class DatabaseManager:
                     (yesterday,)
                 )
                 stats['messages_24h'] = (await cursor.fetchone())[0]
-                
+
                 # Error counts
                 cursor = await conn.execute('SELECT COUNT(*) FROM error_logs WHERE created_at > ?', (yesterday,))
                 stats['errors_24h'] = (await cursor.fetchone())[0]
-                
+
                 # Database size
                 cursor = await conn.execute("SELECT page_count * page_size as size FROM pragma_page_count(), pragma_page_size()")
                 db_size = (await cursor.fetchone())[0]
                 stats['database_size_mb'] = round(db_size / (1024 * 1024), 2)
-                
+
                 return stats
-                
+
         except Exception as e:
             logger.error(f"Failed to get stats: {e}")
             return {}
