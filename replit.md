@@ -165,6 +165,15 @@ The system follows a modular, async-first architecture with clear separation of 
 
 ## Recent Changes
 
+### 2025-07-24: Fixed Critical Issues in Telegram Forwarder Bot
+- ✅ Fixed URL forwarding - Enhanced URL detection patterns and webpage preview handling
+- ✅ Fixed pHash-based image blocking - Improved error handling and library availability checks
+- ✅ Fixed global word blocking - Integrated with config system and environment variables
+- ✅ Enhanced Bot API usage - Ensures all messages sent via Bot API, not user session
+- ✅ Improved error logging - Added comprehensive error handling for URL and formatting issues
+- ✅ Added disable_web_page_preview=False for all URL messages
+- ✅ Fixed LSP errors and type safety issues across codebase
+
 ### 2025-07-24: Critical Functionality Fixes - COMPLETED ✅
 - **Image Blocking Commands**: Fixed `/blockimage` command by implementing Bot API download instead of Telethon client, with direct PIL/imagehash computation in bot_manager.py
 - **Pair-Specific Word Filtering**: Verified and confirmed working - database persistence functional, filtering logic operational, command interface working

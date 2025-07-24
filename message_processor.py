@@ -103,9 +103,12 @@ class MessageProcessor:
             
             # For URL messages without media, ensure webpage previews are enabled
             # This is crucial for proper URL forwarding
-            contains_urls = processed_content and self._contains_urls(processed_content)
+            contains_urls = bool(processed_content and self._contains_urls(processed_content))
             if contains_urls:
                 logger.info(f"Message contains URLs, will enable webpage preview: {processed_content[:200]}...")
+            elif processed_content and self._contains_simple_urls(processed_content):
+                contains_urls = True
+                logger.info(f"Message contains simple URLs, will enable webpage preview: {processed_content[:200]}...")
             
             # Send message with full entity preservation and proper URL preview handling
             sent_message = await self._send_message(
@@ -967,15 +970,30 @@ class MessageProcessor:
             return False
         
         # Check against global blocked words from config
-        BLOCKED_WORDS = getattr(self.config, 'GLOBAL_BLOCKED_WORDS', [
-            "join", "promo", "subscribe", "contact", "spam", "advertisement", "click here"
-        ])
+        BLOCKED_WORDS = getattr(self.config, 'GLOBAL_BLOCKED_WORDS', None)
+        if BLOCKED_WORDS is None:
+            # Fallback to environment variable or default list
+            import os
+            env_words = os.getenv('GLOBAL_BLOCKED_WORDS', '')
+            if env_words:
+                BLOCKED_WORDS = [word.strip() for word in env_words.split(',') if word.strip()]
+            else:
+                BLOCKED_WORDS = [
+                    "join", "promo", "subscribe", "contact", "spam", "advertisement", 
+                    "click here", "free", "limited time", "act now", "don't miss"
+                ]
         
-        text_lower = text.lower()
+        if not BLOCKED_WORDS:
+            return False
+        
+        text_lower = text.lower().strip()
         for word in BLOCKED_WORDS:
-            if word.lower() in text_lower:
-                logger.debug(f"Text blocked for word: {word}")
-                return True
+            if isinstance(word, str) and word.strip():
+                word_lower = word.strip().lower()
+                # Check both exact matches and word boundaries
+                if word_lower in text_lower:
+                    logger.info(f"Text blocked for global word: '{word}' found in: {text[:100]}...")
+                    return True
         
         return False
     
@@ -1003,6 +1021,24 @@ class MessageProcessor:
                 return True
         
         logger.debug(f"No URL patterns found in text: {text[:200]}...")
+        return False
+    
+    def _contains_simple_urls(self, text: str) -> bool:
+        """Fallback check for simple URL patterns"""
+        if not text:
+            return False
+        
+        import re
+        # Simple patterns for URLs that might be missed
+        simple_patterns = [
+            r'[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}(/[^\s]*)?',     # Basic domain.tld pattern
+            r'(?:^|\s)([\w.-]+\.[\w]{2,})(?:\s|$)',        # Domain at word boundaries
+        ]
+        
+        for pattern in simple_patterns:
+            if re.search(pattern, text, re.IGNORECASE):
+                return True
+        
         return False
     
     async def is_blocked_image(self, event, pair: MessagePair) -> bool:

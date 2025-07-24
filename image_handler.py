@@ -82,7 +82,7 @@ class ImageHandler:
                              description: str = "", 
                              blocked_by: str = "",
                              block_scope: str = "pair",
-                             similarity_threshold: int = None) -> bool:
+                             similarity_threshold: Optional[int] = None) -> bool:
         """Add image to block list"""
         if not self.enabled:
             return False
@@ -164,6 +164,10 @@ class ImageHandler:
             buffer.seek(0)
             
             # Open with PIL and compute hash
+            if not IMAGE_PROCESSING_AVAILABLE:
+                logger.warning("Image processing libraries not available")
+                return None
+                
             with Image.open(buffer) as img:
                 # Convert to RGB if necessary
                 if img.mode != 'RGB':
@@ -212,7 +216,7 @@ class ImageHandler:
     
     def _calculate_hash_similarity(self, hash1: str, hash2: str) -> int:
         """Calculate Hamming distance between two hashes"""
-        if not self.enabled:
+        if not self.enabled or not IMAGE_PROCESSING_AVAILABLE:
             return 100
         
         try:
@@ -329,24 +333,27 @@ class ImageHandler:
                 
                 # Total blocked images
                 cursor = await conn.execute('SELECT COUNT(*) FROM blocked_images')
-                stats['total_blocked'] = (await cursor.fetchone())[0]
+                result = await cursor.fetchone()
+                stats['total_blocked'] = result[0] if result and result[0] else 0
                 
                 # Global blocks
                 cursor = await conn.execute(
                     'SELECT COUNT(*) FROM blocked_images WHERE block_scope = "global"'
                 )
-                stats['global_blocks'] = (await cursor.fetchone())[0]
+                result = await cursor.fetchone()
+                stats['global_blocks'] = result[0] if result and result[0] else 0
                 
                 # Pair-specific blocks
                 cursor = await conn.execute(
                     'SELECT COUNT(*) FROM blocked_images WHERE block_scope = "pair"'
                 )
-                stats['pair_blocks'] = (await cursor.fetchone())[0]
+                result = await cursor.fetchone()
+                stats['pair_blocks'] = result[0] if result and result[0] else 0
                 
                 # Total usage
                 cursor = await conn.execute('SELECT SUM(usage_count) FROM blocked_images')
                 result = await cursor.fetchone()
-                stats['total_blocks_triggered'] = result[0] if result[0] else 0
+                stats['total_blocks_triggered'] = result[0] if result and result[0] else 0
                 
                 return stats
                 
@@ -354,7 +361,7 @@ class ImageHandler:
             logger.error(f"Failed to get image stats: {e}")
             return {}
     
-    async def remove_image_block(self, image_hash: str, pair_id: Optional[int] = None) -> bool:
+    async def remove_image_block_by_hash(self, image_hash: str, pair_id: Optional[int] = None) -> bool:
         """Remove image block by hash"""
         try:
             async with self.db_manager.get_connection() as conn:

@@ -51,9 +51,13 @@ class MessageFilter:
         """Load global blocking rules"""
         try:
             global_blocks_str = await self.db_manager.get_setting("global_blocks", '{"words": [], "patterns": []}')
-            self.global_blocks = json.loads(global_blocks_str)
+            if global_blocks_str:
+                self.global_blocks = json.loads(global_blocks_str)
+            else:
+                self.global_blocks = {"words": [], "patterns": []}
         except Exception as e:
             logger.error(f"Failed to load global blocks: {e}")
+            self.global_blocks = {"words": [], "patterns": []}
     
     async def should_copy_message(self, event, pair: MessagePair) -> FilterResult:
         """Determine if message should be copied based on filters"""
@@ -138,7 +142,7 @@ class MessageFilter:
             logger.error(f"Error in message filtering: {e}")
             return FilterResult(False, f"Filter error: {e}", ["error"])
     
-    async def filter_text(self, text: str, pair: MessagePair, entities: List = None) -> tuple[str, List]:
+    async def filter_text(self, text: str, pair: MessagePair, entities: Optional[List] = None) -> tuple[str, List]:
         """Apply text transformations and filtering with entity preservation"""
         try:
             filtered_text = text
@@ -282,7 +286,7 @@ class MessageFilter:
         if isinstance(media, MessageMediaPhoto):
             return "photo"
         elif isinstance(media, MessageMediaDocument):
-            if hasattr(media.document, 'mime_type') and media.document.mime_type:
+            if hasattr(media, 'document') and media.document and hasattr(media.document, 'mime_type') and media.document.mime_type:
                 mime_type = media.document.mime_type
                 if mime_type.startswith('image/'):
                     return "photo"
