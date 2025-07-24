@@ -258,16 +258,20 @@ class MessageFilter:
         return self._regex_cache[pattern]
     
     def _contains_links(self, text: str) -> bool:
-        """Check if text contains links"""
-        link_patterns = [
-            r'http[s]?://\S+',
-            r'www\.\S+',
-            r't\.me/\S+',
-            r'@\w+',
-            r'\w+\.\w{2,}',
+        """Check if text contains links (for blocking purposes)"""
+        if not text:
+            return False
+            
+        # Only block specific spam/promotional links, not all URLs
+        spam_link_patterns = [
+            r't\.me/joinchat/\S+',     # Telegram join links
+            r't\.me/\+\S+',            # Telegram plus links
+            r'@\w+bot\b',              # Bot mentions
+            r'bit\.ly/\S+',            # Shortened URLs
+            r'tinyurl\.com/\S+',       # Shortened URLs
         ]
         
-        for pattern in link_patterns:
+        for pattern in spam_link_patterns:
             if re.search(pattern, text, re.IGNORECASE):
                 return True
         
