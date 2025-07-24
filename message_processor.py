@@ -249,7 +249,18 @@ class MessageProcessor:
             # Always apply text filters (mention removal, header/footer, etc.) but preserve formatting
             # First apply all text transformations
             filtered_text, processed_entities = await self.message_filter.filter_text(text, pair, entities)
-            logger.debug(f"Applied text filters. Original: {len(text)}, Filtered: {len(filtered_text)}")
+            
+            # Log text filtering results
+            original_lines = len(text.split('\n'))
+            filtered_lines = len(filtered_text.split('\n'))
+            logger.info(f"Text filtering completed - Lines: {original_lines} → {filtered_lines}, Length: {len(text)} → {len(filtered_text)}")
+            
+            if text != filtered_text:
+                logger.info(f"Text was modified by filters")
+                logger.debug(f"Original: {repr(text[:200])}")
+                logger.debug(f"Filtered: {repr(filtered_text[:200])}")
+            else:
+                logger.info(f"Text unchanged by filters")
             
             # Check length limits
             min_length = pair.filters.get("min_message_length", 0)

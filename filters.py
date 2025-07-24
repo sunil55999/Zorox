@@ -154,18 +154,32 @@ class MessageFilter:
             filtered_text = text
             processed_entities = entities.copy() if entities else []
             
+            logger.info(f"Starting text filtering for pair {pair.id}")
+            
             # Remove header/footer based on regex patterns (per-pair)
             header_patterns = pair.filters.get("header_regex", [])
             if header_patterns:
                 if isinstance(header_patterns, str):
                     header_patterns = [header_patterns]
+                logger.info(f"Applying header removal with patterns: {header_patterns}")
+                before_header = filtered_text
                 filtered_text = self._remove_headers(filtered_text, header_patterns)
+                if before_header != filtered_text:
+                    logger.info(f"Header removal changed text: {len(before_header)} → {len(filtered_text)} chars")
+                else:
+                    logger.info("Header removal: no changes made")
             
             footer_patterns = pair.filters.get("footer_regex", [])
             if footer_patterns:
                 if isinstance(footer_patterns, str):
-                    footer_patterns = [footer_patterns]  
+                    footer_patterns = [footer_patterns]
+                logger.info(f"Applying footer removal with patterns: {footer_patterns}")
+                before_footer = filtered_text
                 filtered_text = self._remove_footers(filtered_text, footer_patterns)
+                if before_footer != filtered_text:
+                    logger.info(f"Footer removal changed text: {len(before_footer)} → {len(filtered_text)} chars")
+                else:
+                    logger.info("Footer removal: no changes made")
             
             # Process mentions with optional placeholders
             if pair.filters.get("remove_mentions", False):
