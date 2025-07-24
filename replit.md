@@ -201,19 +201,19 @@ The system follows a modular, async-first architecture with clear separation of 
 - **Webpage preview enablement**: Removed disable_web_page_preview restrictions for proper link previews
 - **Entity bounds validation**: Added text length validation to prevent entity parsing errors
 
-### 2025-07-24: Message Formatting and Media Forwarding Fixes
-- **Fixed message formatting preservation**: Implemented proper entity handling to preserve original formatting (bold, italic, underline, emojis) without adding unnecessary asterisks or corrupting markdown
-- **Enhanced direct forwarding**: Added `event.forward_to()` support for media messages to maintain perfect formatting and media quality preservation
-- **Comprehensive media support**: Fixed handling of all media types including photos, videos, documents, stickers, animations, voice messages, and video notes
-- **Webpage preview enablement**: Fixed webpage previews by setting `disable_web_page_preview=False` in both message sending and editing functions
-- **Robust document attribute handling**: Added safe attribute access with `getattr()` to prevent type errors when processing Telethon document attributes
-- **Entity conversion improvements**: Enhanced Telethon-to-Bot API entity mapping with comprehensive bounds checking and fallback handling
-- **Statistics type safety**: Fixed all dictionary key type conflicts in pair statistics to prevent runtime errors
-- **Original formatting preservation**: Added `preserve_original_formatting` filter to maintain Discord-like and emoji-heavy message structure without modification
+### 2025-07-24: Complete Media Download and Webpage Preview Fix
+- **Replaced direct forwarding with media downloads**: Removed `event.forward_to()` and implemented proper media downloading via Telethon with Bot API sending for consistent bot sender appearance
+- **Enhanced media processing**: All media types (photos, videos, documents, stickers, animations, voice messages, video notes) are now downloaded to temporary files and sent via appropriate Bot API methods
+- **Enabled webpage previews**: Fixed messages with links to show webpage previews by setting `disable_web_page_preview=False` throughout the system
+- **Safe file handling**: Added proper temporary file management with automatic cleanup after media sending to prevent disk space issues
+- **Comprehensive media support**: Each media type uses its dedicated Bot API method (send_photo, send_video, send_document, etc.) with proper attributes preservation
+- **Fixed LSP diagnostics**: Resolved all type conflicts, document attribute access issues, and statistics handling problems
+- **Type safety improvements**: Updated MessagePair stats field from `Dict[str, int]` to `Dict[str, Any]` to support both numeric and string values like timestamps
 
 #### Technical Implementation Details:
-- Uses `event.raw_text` instead of processed text for better formatting preservation
-- Implements multi-level fallback: Direct forwarding → Bot API with entities → Plain text as last resort
-- Safely handles all Telethon document attribute types (DocumentAttributeFilename, DocumentAttributeVideo, etc.)
-- Validates entity bounds against UTF-16 text length for Telegram compatibility
-- Maintains original message spacing, emojis, and formatting without double-wrapping
+- Downloads media using `event.download_media(file=tempfile.mktemp())` for safe temporary file handling
+- Sends media with proper file handles using `with open(file_path, 'rb')` context managers
+- Automatically cleans up downloaded files after successful/failed sending operations
+- Preserves all media attributes (duration, width, height, filename) during Bot API sending
+- Maintains caption and caption_entities for media messages with text content
+- Uses bot appearance instead of user session forwarding for consistent sender identity

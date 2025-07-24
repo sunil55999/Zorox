@@ -26,7 +26,7 @@ class MessagePair:
     status: str = "active"
     assigned_bot_index: int = 0
     filters: Dict[str, Any] = field(default_factory=dict)
-    stats: Dict[str, int] = field(default_factory=dict)
+    stats: Dict[str, Any] = field(default_factory=dict)
     created_at: Optional[str] = None
 
     def __post_init__(self):

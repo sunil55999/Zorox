@@ -4,13 +4,15 @@ Message Processor - Handles message filtering and copying logic
 
 import asyncio
 import logging
+import os
 import re
+import tempfile
 import time
 from typing import Dict, List, Optional, Any, Tuple
 from io import BytesIO
 from datetime import datetime
 
-from telegram import Bot, InputMediaPhoto, InputMediaVideo, InputMediaDocument, MessageEntity
+from telegram import Bot, InputMediaPhoto, InputMediaVideo, InputMediaDocument, MessageEntity, InputFile
 from telegram.error import TelegramError, BadRequest, Forbidden
 from telethon.tl.types import (
     MessageMediaPhoto, MessageMediaDocument
@@ -57,7 +59,7 @@ class MessageProcessor:
                 self.stats['messages_filtered'] += 1
                 
                 # Update pair stats
-                pair.stats['messages_filtered'] += 1
+                pair.stats['messages_filtered'] = pair.stats.get('messages_filtered', 0) + 1
                 await self.db_manager.update_pair(pair)
                 return True  # Successfully filtered (not an error)
             
@@ -66,53 +68,14 @@ class MessageProcessor:
             if event.is_reply and pair.filters.get("preserve_replies", True):
                 reply_to_message_id = await self._find_reply_target(event, pair)
             
-            # Try direct forwarding for media messages when possible
-            if event.media and pair.filters.get("use_direct_forwarding", True):
-                try:
-                    # Attempt direct forwarding (preserves all formatting and media perfectly)
-                    forwarded_message = await event.forward_to(pair.destination_chat_id)
-                    if forwarded_message:
-                        # Save message mapping
-                        mapping = MessageMapping(
-                            id=0,
-                            source_message_id=event.id,
-                            destination_message_id=forwarded_message.id,
-                            pair_id=pair.id,
-                            bot_index=bot_index,
-                            source_chat_id=pair.source_chat_id,
-                            destination_chat_id=pair.destination_chat_id,
-                            message_type=self._get_message_type(event),
-                            has_media=bool(event.media),
-                            is_reply=bool(reply_to_message_id),
-                            reply_to_source_id=event.reply_to_msg_id if event.is_reply else None,
-                            reply_to_dest_id=reply_to_message_id
-                        )
-                        
-                        await self.db_manager.save_message_mapping(mapping)
-                        
-                        # Update statistics
-                        self.stats['messages_copied'] += 1
-                        pair.stats['messages_copied'] = pair.stats.get('messages_copied', 0) + 1
-                        pair.stats['last_activity'] = datetime.now().isoformat()
-                        self.stats['media_processed'] += 1
-                        
-                        if reply_to_message_id:
-                            pair.stats['replies_preserved'] = pair.stats.get('replies_preserved', 0) + 1
-                        
-                        await self.db_manager.update_pair(pair)
-                        
-                        logger.debug(f"Message forwarded directly: {event.id} -> {forwarded_message.id}")
-                        return True
-                except Exception as forward_error:
-                    logger.debug(f"Direct forwarding failed, falling back to bot API: {forward_error}")
-            
+            # Always use Bot API for consistent sender appearance (not direct forwarding)
             # Process message content with entities (preserve original formatting)
             processed_content, processed_entities = await self._process_message_content(event, pair)
             
-            # Handle media if present (fallback when direct forwarding failed or disabled)
+            # Handle media if present - download via Telethon and send via Bot API
             media_info = None
             if event.media:
-                media_info = await self._process_media(event, pair, bot)
+                media_info = await self._download_and_prepare_media(event, pair, bot)
                 if media_info is False:  # Media blocked
                     self.stats['messages_filtered'] += 1
                     pair.stats['messages_filtered'] = pair.stats.get('messages_filtered', 0) + 1
@@ -165,7 +128,7 @@ class MessageProcessor:
         except Exception as e:
             logger.error(f"Error processing new message: {e}")
             self.stats['errors'] += 1
-            pair.stats['errors'] += 1
+            pair.stats['errors'] = pair.stats.get('errors', 0) + 1
             await self.db_manager.update_pair(pair)
             return False
     
@@ -343,9 +306,10 @@ class MessageProcessor:
             
             if hasattr(media, 'document') and media.document and getattr(media.document, 'attributes', None):
                 document = media.document
+                attributes = getattr(document, 'attributes', [])
                 
                 # Safely extract filename and attributes from document
-                for attr in document.attributes:
+                for attr in attributes:
                     attr_type = type(attr).__name__
                     # Extract filename from DocumentAttributeFilename
                     if attr_type == 'DocumentAttributeFilename':
@@ -363,9 +327,9 @@ class MessageProcessor:
                     thumbs = getattr(document, 'thumbs', [])
                     thumb = thumbs[0] if thumbs else None
             
-            elif hasattr(media, 'photo') and getattr(media, 'photo', None):
+            elif hasattr(event.media, 'photo') and getattr(event.media, 'photo', None):
                 # Handle photo attributes
-                photo = media.photo
+                photo = event.media.photo
                 if hasattr(photo, 'sizes') and photo.sizes:
                     largest_size = max(photo.sizes, key=lambda s: getattr(s, 'w', 0) * getattr(s, 'h', 0))
                     width = getattr(largest_size, 'w', None)
@@ -393,6 +357,79 @@ class MessageProcessor:
             logger.error(f"Error processing media: {e}")
             return None
     
+    async def _download_and_prepare_media(self, event, pair: MessagePair, bot: Bot) -> Optional[Dict]:
+        """Download media via Telethon and prepare for Bot API sending"""
+        try:
+            # Apply media filters if needed  
+            # Note: Media filtering is handled in the main process flow
+            # We'll keep this simple and focus on download/prepare
+            
+            # Get media type for proper handling
+            media_type = self._get_message_type(event)
+            if media_type == "text":
+                return None
+            
+            # Create a temporary file for download
+            temp_file = None
+            try:
+                # Download media to temporary file
+                temp_file = await event.download_media(file=tempfile.mktemp())
+                if not temp_file or not os.path.exists(temp_file):
+                    logger.error("Failed to download media")
+                    return None
+                
+                # Extract media attributes safely
+                filename = None
+                duration = None
+                width = None
+                height = None
+                
+                if hasattr(event.media, 'document') and event.media.document:
+                    document = event.media.document
+                    if getattr(document, 'attributes', None):
+                        for attr in document.attributes:
+                            attr_type = type(attr).__name__
+                            if attr_type == 'DocumentAttributeFilename':
+                                filename = getattr(attr, 'file_name', None)
+                            elif attr_type in ['DocumentAttributeVideo', 'DocumentAttributeAudio']:
+                                duration = getattr(attr, 'duration', None)
+                            elif attr_type in ['DocumentAttributeVideo', 'DocumentAttributeImageSize']:
+                                width = getattr(attr, 'w', None)
+                                height = getattr(attr, 'h', None)
+                
+                elif hasattr(event.media, 'photo') and event.media.photo:
+                    photo = event.media.photo
+                    if hasattr(photo, 'sizes') and photo.sizes:
+                        largest_size = max(photo.sizes, key=lambda s: getattr(s, 'w', 0) * getattr(s, 'h', 0))
+                        width = getattr(largest_size, 'w', None)
+                        height = getattr(largest_size, 'h', None)
+                
+                # Prepare media for Bot API with file cleanup
+                return {
+                    'type': media_type,
+                    'file_path': temp_file,
+                    'filename': filename,
+                    'duration': duration,
+                    'width': width,
+                    'height': height,
+                    'caption': event.raw_text or event.text or "",
+                    'cleanup_required': True
+                }
+                
+            except Exception as download_error:
+                # Clean up on error
+                if temp_file and os.path.exists(temp_file):
+                    try:
+                        os.unlink(temp_file)
+                    except:
+                        pass
+                logger.error(f"Error downloading media: {download_error}")
+                return None
+                
+        except Exception as e:
+            logger.error(f"Error preparing media: {e}")
+            return None
+            
     async def _download_media(self, event) -> Optional[BytesIO]:
         """Download media from message"""
         try:
@@ -442,84 +479,119 @@ class MessageProcessor:
                         )
             
             if media_info and media_info.get('type') != 'webpage':
-                # Send media message with enhanced content handling
+                # Send media message with downloaded file
                 caption = content[:1024] if content else None
                 caption_entities = self._validate_and_convert_entities(caption, entities) if caption and entities else None
                 
                 media_type = media_info['type']
+                file_path = media_info.get('file_path')
                 
-                # Send based on media type with all attributes preserved
-                if media_type == 'photo':
-                    return await bot.send_photo(
-                        chat_id=chat_id,
-                        photo=media_info['data'],
-                        caption=caption,
-                        caption_entities=caption_entities,
-                        reply_to_message_id=reply_to_message_id
-                    )
-                elif media_type == 'video':
-                    return await bot.send_video(
-                        chat_id=chat_id,
-                        video=media_info['data'],
-                        caption=caption,
-                        caption_entities=caption_entities,
-                        duration=media_info.get('duration'),
-                        width=media_info.get('width'),
-                        height=media_info.get('height'),
-                        reply_to_message_id=reply_to_message_id
-                    )
-                elif media_type == 'animation':
-                    return await bot.send_animation(
-                        chat_id=chat_id,
-                        animation=media_info['data'],
-                        caption=caption,
-                        caption_entities=caption_entities,
-                        duration=media_info.get('duration'),
-                        width=media_info.get('width'),
-                        height=media_info.get('height'),
-                        reply_to_message_id=reply_to_message_id
-                    )
-                elif media_type == 'document':
-                    return await bot.send_document(
-                        chat_id=chat_id,
-                        document=media_info['data'],
-                        filename=media_info.get('filename'),
-                        caption=caption,
-                        caption_entities=caption_entities,
-                        reply_to_message_id=reply_to_message_id
-                    )
-                elif media_type == 'audio':
-                    return await bot.send_audio(
-                        chat_id=chat_id,
-                        audio=media_info['data'],
-                        caption=caption,
-                        caption_entities=caption_entities,
-                        duration=media_info.get('duration'),
-                        reply_to_message_id=reply_to_message_id
-                    )
-                elif media_type == 'voice':
-                    return await bot.send_voice(
-                        chat_id=chat_id,
-                        voice=media_info['data'],
-                        caption=caption,
-                        caption_entities=caption_entities,
-                        duration=media_info.get('duration'),
-                        reply_to_message_id=reply_to_message_id
-                    )
-                elif media_type == 'video_note':
-                    return await bot.send_video_note(
-                        chat_id=chat_id,
-                        video_note=media_info['data'],
-                        duration=media_info.get('duration'),
-                        length=media_info.get('width', 240),  # Video notes are square
-                        reply_to_message_id=reply_to_message_id
-                    )
-                elif media_type == 'sticker':
-                    return await bot.send_sticker(
-                        chat_id=chat_id,
-                        sticker=media_info['data'],
-                        reply_to_message_id=reply_to_message_id
-                    )
+                if not file_path or not os.path.exists(file_path):
+                    logger.error("Media file path is invalid or file doesn't exist")
+                    return None
+                
+                try:
+                    # Send based on media type with all attributes preserved
+                    if media_type == 'photo':
+                        with open(file_path, 'rb') as photo_file:
+                            result = await bot.send_photo(
+                                chat_id=chat_id,
+                                photo=photo_file,
+                                caption=caption,
+                                caption_entities=caption_entities,
+                                reply_to_message_id=reply_to_message_id
+                            )
+                    elif media_type == 'video':
+                        with open(file_path, 'rb') as video_file:
+                            result = await bot.send_video(
+                                chat_id=chat_id,
+                                video=video_file,
+                                caption=caption,
+                                caption_entities=caption_entities,
+                                duration=media_info.get('duration'),
+                                width=media_info.get('width'),
+                                height=media_info.get('height'),
+                                reply_to_message_id=reply_to_message_id
+                            )
+                    elif media_type == 'animation':
+                        with open(file_path, 'rb') as animation_file:
+                            result = await bot.send_animation(
+                                chat_id=chat_id,
+                                animation=animation_file,
+                                caption=caption,
+                                caption_entities=caption_entities,
+                                duration=media_info.get('duration'),
+                                width=media_info.get('width'),
+                                height=media_info.get('height'),
+                                reply_to_message_id=reply_to_message_id
+                            )
+                    elif media_type == 'document':
+                        with open(file_path, 'rb') as document_file:
+                            result = await bot.send_document(
+                                chat_id=chat_id,
+                                document=document_file,
+                                filename=media_info.get('filename'),
+                                caption=caption,
+                                caption_entities=caption_entities,
+                                reply_to_message_id=reply_to_message_id
+                            )
+                    elif media_type == 'audio':
+                        with open(file_path, 'rb') as audio_file:
+                            result = await bot.send_audio(
+                                chat_id=chat_id,
+                                audio=audio_file,
+                                caption=caption,
+                                caption_entities=caption_entities,
+                                duration=media_info.get('duration'),
+                                reply_to_message_id=reply_to_message_id
+                            )
+                    elif media_type == 'voice':
+                        with open(file_path, 'rb') as voice_file:
+                            result = await bot.send_voice(
+                                chat_id=chat_id,
+                                voice=voice_file,
+                                caption=caption,
+                                caption_entities=caption_entities,
+                                duration=media_info.get('duration'),
+                                reply_to_message_id=reply_to_message_id
+                            )
+                    elif media_type == 'video_note':
+                        with open(file_path, 'rb') as video_note_file:
+                            result = await bot.send_video_note(
+                                chat_id=chat_id,
+                                video_note=video_note_file,
+                                duration=media_info.get('duration'),
+                                length=media_info.get('width', 240),  # Video notes are square
+                                reply_to_message_id=reply_to_message_id
+                            )
+                    elif media_type == 'sticker':
+                        with open(file_path, 'rb') as sticker_file:
+                            result = await bot.send_sticker(
+                                chat_id=chat_id,
+                                sticker=sticker_file,
+                                reply_to_message_id=reply_to_message_id
+                            )
+                    else:
+                        result = None
+                    
+                    # Clean up downloaded file
+                    if media_info.get('cleanup_required') and file_path and os.path.exists(file_path):
+                        try:
+                            os.unlink(file_path)
+                        except Exception as cleanup_error:
+                            logger.warning(f"Failed to cleanup temp file {file_path}: {cleanup_error}")
+                    
+                    return result
+                    
+                except Exception as send_error:
+                    # Clean up on error
+                    if media_info.get('cleanup_required') and file_path and os.path.exists(file_path):
+                        try:
+                            os.unlink(file_path)
+                        except:
+                            pass
+                    raise send_error
+
             else:
                 # Send text message with enhanced formatting support
                 if content:
