@@ -295,6 +295,11 @@ class BotManager:
                 await self.admin_application.initialize()
                 await self.admin_application.start()
                 logger.info("Started admin bot application")
+                
+                # Start polling for admin bot to receive commands
+                admin_task = asyncio.create_task(self.admin_application.updater.start_polling())
+                self.worker_tasks.append(admin_task)
+                logger.info("Started admin bot polling")
             
             # Start message sending bot applications
             for i, app in enumerate(self.bot_applications):
@@ -706,8 +711,8 @@ class BotManager:
     async def _cmd_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Start command handler"""
         if not update.effective_user or not self._is_admin(update.effective_user.id):
+            await update.message.reply_text("❌ You are not authorized to use this bot.")
             return
-        
         await update.message.reply_text(
             "🤖 Telegram Message Copying Bot\n\n"
             "Available commands:\n"
@@ -1792,6 +1797,7 @@ class BotManager:
         if not self.config.ADMIN_USER_IDS:
             logger.warning(f"No admin users configured, allowing user {user_id} for setup")
             return True
+            
         return user_id in self.config.ADMIN_USER_IDS
     
     def _get_uptime(self) -> str:
