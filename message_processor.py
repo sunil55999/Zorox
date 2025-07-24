@@ -101,10 +101,17 @@ class MessageProcessor:
                     await self.db_manager.update_pair(pair)
                     return True
             
-            # Send message with full entity preservation
+            # For URL messages without media, ensure webpage previews are enabled
+            # This is crucial for proper URL forwarding
+            enable_webpage_preview = True
+            if processed_content and self._contains_urls(processed_content):
+                logger.debug(f"Message contains URLs, ensuring webpage preview is enabled")
+                enable_webpage_preview = True
+            
+            # Send message with full entity preservation and proper URL preview handling
             sent_message = await self._send_message(
                 bot, pair.destination_chat_id, processed_content or "", 
-                media_info, reply_to_message_id, processed_entities or []
+                media_info, reply_to_message_id, processed_entities or [], enable_webpage_preview
             )
             
             if sent_message:
@@ -469,7 +476,7 @@ class MessageProcessor:
 
     async def _send_message(self, bot: Bot, chat_id: int, content: str, 
                           media_info: Optional[Dict], reply_to_message_id: Optional[int] = None,
-                          entities: Optional[List] = None):
+                          entities: Optional[List] = None, enable_webpage_preview: bool = True):
         """Send message to destination chat with comprehensive media and formatting support"""
         try:
             # Validate and convert entities for proper formatting and premium emoji support  
@@ -612,13 +619,13 @@ class MessageProcessor:
                     raise send_error
 
             else:
-                # Send text message with enhanced formatting support
+                # Send text message with enhanced formatting support and URL preview handling
                 if content:
                     return await bot.send_message(
                         chat_id=chat_id,
                         text=content,
                         entities=converted_entities,
-                        disable_web_page_preview=False,  # Enable webpage previews
+                        disable_web_page_preview=not enable_webpage_preview,  # Use parameter for webpage previews
                         reply_to_message_id=reply_to_message_id
                     )
             
@@ -653,8 +660,13 @@ class MessageProcessor:
                     elif media_type == 'sticker':
                         return await bot.send_sticker(chat_id=chat_id, sticker=media_info['data'], reply_to_message_id=reply_to_message_id)
                 else:
-                    # Final fallback: plain text without entities
-                    return await bot.send_message(chat_id=chat_id, text=content, reply_to_message_id=reply_to_message_id, disable_web_page_preview=False)
+                    # Final fallback: plain text without entities, preserve URL preview setting
+                    return await bot.send_message(
+                        chat_id=chat_id, 
+                        text=content, 
+                        reply_to_message_id=reply_to_message_id, 
+                        disable_web_page_preview=not enable_webpage_preview
+                    )
             except Exception as fallback_error:
                 logger.error(f"All fallback attempts failed: {fallback_error}")
                 return None
@@ -946,6 +958,25 @@ class MessageProcessor:
         for word in BLOCKED_WORDS:
             if word.lower() in text_lower:
                 logger.debug(f"Text blocked for word: {word}")
+                return True
+        
+        return False
+    
+    def _contains_urls(self, text: str) -> bool:
+        """Check if text contains URLs that should have webpage previews"""
+        if not text:
+            return False
+        
+        import re
+        # URL patterns that typically generate webpage previews
+        url_patterns = [
+            r'https?://[^\s<>"]+',  # HTTP/HTTPS URLs
+            r'www\.[^\s<>"]+',      # www URLs
+            r't\.me/[^\s<>"]+',     # Telegram links
+        ]
+        
+        for pattern in url_patterns:
+            if re.search(pattern, text, re.IGNORECASE):
                 return True
         
         return False

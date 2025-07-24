@@ -1603,22 +1603,61 @@ Use `/cleanup --force` to proceed with cleanup.
                     # First argument is description, not pair_id
                     description = " ".join(context.args)
             
-            # Create a mock event for image processing
-            class MockEvent:
-                def __init__(self, message):
-                    self.id = message.message_id
-                    self.media = message.photo[-1] if message.photo else None
-                    self.client = None  # Will need to be handled
-            
-            mock_event = MockEvent(reply_msg)
-            pair = self.pairs.get(pair_id) if pair_id else None
-            
-            if update.effective_user:
-                success = await self.image_handler.add_image_block(
-                    mock_event, pair, description, 
-                    str(update.effective_user.id), block_scope
-                )
-            else:
+            # Alternative approach: Download image directly using Bot API and compute hash
+            try:
+                # Get file from Bot API
+                photo = reply_msg.photo[-1]  # Get largest photo
+                file = await context.bot.get_file(photo.file_id)
+                
+                # Download image data
+                from io import BytesIO
+                buffer = BytesIO()
+                await file.download_to_memory(buffer)
+                buffer.seek(0)
+                
+                # Compute hash directly
+                if self.image_handler.enabled:
+                    try:
+                        from PIL import Image
+                        import imagehash
+                        
+                        with Image.open(buffer) as img:
+                            if img.mode != 'RGB':
+                                img = img.convert('RGB')
+                            
+                            phash = imagehash.phash(img)
+                            image_hash = str(phash)
+                            
+                            # Use config default threshold
+                            similarity_threshold = self.config.SIMILARITY_THRESHOLD
+                            
+                            # Save to database directly
+                            async with self.db_manager.get_connection() as conn:
+                                await conn.execute('''
+                                    INSERT OR REPLACE INTO blocked_images 
+                                    (phash, pair_id, description, blocked_by, block_scope, similarity_threshold)
+                                    VALUES (?, ?, ?, ?, ?, ?)
+                                ''', (
+                                    image_hash,
+                                    pair_id if block_scope == "pair" else None,
+                                    description,
+                                    str(update.effective_user.id),
+                                    block_scope,
+                                    similarity_threshold
+                                ))
+                                await conn.commit()
+                            
+                            success = True
+                            logger.info(f"Added image block: {image_hash} (scope: {block_scope})")
+                    except Exception as hash_error:
+                        logger.error(f"Error computing image hash: {hash_error}")
+                        success = False
+                else:
+                    await update.message.reply_text("Image processing not available (PIL/imagehash not installed)")
+                    return
+                    
+            except Exception as download_error:
+                logger.error(f"Error downloading image: {download_error}")
                 success = False
             
             if success:

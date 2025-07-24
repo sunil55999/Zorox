@@ -165,13 +165,14 @@ The system follows a modular, async-first architecture with clear separation of 
 
 ## Recent Changes
 
-### 2025-07-24: Critical Functionality Fixes - COMPLETED
-- **URL Forwarding**: Fixed and verified - all messages send with `disable_web_page_preview=False` to enable URL previews throughout the system
+### 2025-07-24: Critical Functionality Fixes - COMPLETED ✅
+- **Image Blocking Commands**: Fixed `/blockimage` command by implementing Bot API download instead of Telethon client, with direct PIL/imagehash computation in bot_manager.py
+- **Pair-Specific Word Filtering**: Verified and confirmed working - database persistence functional, filtering logic operational, command interface working
+- **URL Forwarding**: Fixed and verified - all messages send with `disable_web_page_preview=False` throughout message_processor.py pipeline
 - **Database Method Fix**: Added missing `get_pair_by_id()` method to DatabaseManager, resolving command failures
-- **Image Blocking Fix**: Enhanced null safety in image handler to prevent 'NoneType' download_media errors
 - **Command Safety**: Fixed null checking in `/blockword`, `/unblockword`, and `/blockimage` commands with proper user validation
-- **Comprehensive Testing**: All fixes verified through automated testing - database, image handler, URL forwarding, and bot commands all working
-- **System Status**: Bot system operational with 1 pair loaded, all workers active, commands functional
+- **Comprehensive Testing**: All fixes verified through automated testing - image blocking, word filtering, URL forwarding, and database operations all working
+- **System Status**: Bot system operational with full functionality restored, all three reported critical issues resolved
 
 ### 2025-07-24: Complete Advanced Filtering System Implementation
 - **Comprehensive filtering system**: Implemented phash-based image blocking with global/pair-specific scopes
