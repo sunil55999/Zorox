@@ -560,21 +560,27 @@ class MessageFilter:
             return text, entities or []
     
     def _clean_excessive_spaces(self, text: str) -> str:
-        """Clean up excessive spaces while preserving newlines"""
+        """Clean up excessive spaces while preserving message structure and newlines"""
         if not text:
             return text
         
-        # Clean multiple spaces but preserve newlines
-        # Replace multiple spaces with single space
-        text = re.sub(r' +', ' ', text)
+        # Preserve the original text structure - only clean up truly excessive spacing
+        # Split into lines to preserve structure
+        lines = text.split('\n')
+        cleaned_lines = []
         
-        # Clean up spaces around newlines
-        text = re.sub(r' *\n *', '\n', text)
+        for line in lines:
+            # Clean multiple consecutive spaces within a line (but keep at least one)
+            cleaned_line = re.sub(r' {2,}', ' ', line)
+            # Remove trailing spaces from each line
+            cleaned_line = cleaned_line.rstrip()
+            cleaned_lines.append(cleaned_line)
         
-        # Remove trailing spaces on lines
-        text = re.sub(r' +$', '', text, flags=re.MULTILINE)
+        # Rejoin with original newline structure
+        result = '\n'.join(cleaned_lines)
         
-        return text.strip()
+        # Only strip leading/trailing whitespace from the entire message, preserve internal structure
+        return result.strip()
     
     def _normalize_whitespace_with_entities(self, text: str, entities: List) -> tuple[str, List]:
         """Normalize whitespace while preserving entity positions"""
@@ -732,45 +738,65 @@ class MessageFilter:
             return False
     
     def _remove_mentions(self, text: str, placeholder: str = "") -> str:
-        """Enhanced mention removal with complete removal (no placeholders) and clean formatting"""
+        """Enhanced mention removal with complete removal while preserving message structure"""
         if not text:
             return text
         try:
             original_text = text
             
-            # Step 1: Handle mentions in parentheses - remove entire parentheses
-            text = re.sub(r'\(\s*@[a-zA-Z0-9_]{1,32}\s*\)', '', text)
+            # Process line by line to preserve message structure
+            lines = text.split('\n')
+            cleaned_lines = []
             
-            # Step 2: Handle @mentions with surrounding text patterns
-            # Pattern: "from @username" -> "from"
-            text = re.sub(r'\b(from|by|via|contact|join)\s+@[a-zA-Z0-9_]{1,32}\b', r'\1', text, flags=re.IGNORECASE)
+            for line in lines:
+                if not line.strip():
+                    # Keep empty lines to preserve message structure
+                    cleaned_lines.append(line)
+                    continue
+                
+                cleaned_line = line
+                
+                # Step 1: Handle mentions in parentheses - remove entire parentheses
+                cleaned_line = re.sub(r'\(\s*@[a-zA-Z0-9_]{1,32}\s*\)', '', cleaned_line)
+                
+                # Step 2: Handle @mentions with surrounding text patterns
+                # Pattern: "from @username" -> "from"
+                cleaned_line = re.sub(r'\b(from|by|via|contact|join)\s+@[a-zA-Z0-9_]{1,32}\b', r'\1', cleaned_line, flags=re.IGNORECASE)
+                
+                # Step 3: Handle @mentions preceded by punctuation - clean up punctuation  
+                cleaned_line = re.sub(r'([,\.;:!?]\s*)@[a-zA-Z0-9_]{1,32}\b', r'\1', cleaned_line)
+                
+                # Step 4: Handle standard @mentions (but not email addresses) - complete removal
+                cleaned_line = re.sub(r'(?<!\w)@[a-zA-Z0-9_]{1,32}\b', '', cleaned_line)
+                
+                # Step 5: Handle user ID links - complete removal
+                cleaned_line = re.sub(r'tg://user\?id=\d+', '', cleaned_line)
+                
+                # Step 6: Handle telegram.me and t.me links
+                cleaned_line = re.sub(r'(https?://)?(t\.me|telegram\.me)/[a-zA-Z0-9_]+', '', cleaned_line, flags=re.IGNORECASE)
+                
+                # Clean up formatting issues from removals (within the line only)
+                cleaned_line = re.sub(r'\s*,\s*,\s*', ', ', cleaned_line)  # Fix double commas
+                cleaned_line = re.sub(r'\s*,\s*$', '', cleaned_line)  # Remove trailing comma
+                cleaned_line = re.sub(r'^\s*,\s*', '', cleaned_line)  # Remove leading comma
+                cleaned_line = re.sub(r'\s*\.\s*\.\s*', '. ', cleaned_line)  # Fix double periods
+                cleaned_line = re.sub(r'\s+', ' ', cleaned_line)  # Multiple spaces to single space
+                cleaned_line = cleaned_line.strip()
+                
+                cleaned_lines.append(cleaned_line)
             
-            # Step 3: Handle @mentions preceded by punctuation - clean up punctuation  
-            text = re.sub(r'([,\.;:!?]\s*)@[a-zA-Z0-9_]{1,32}\b', r'\1', text)
+            # Rejoin lines preserving original structure
+            result = '\n'.join(cleaned_lines)
             
-            # Step 4: Handle standard @mentions (but not email addresses) - complete removal
-            text = re.sub(r'(?<!\w)@[a-zA-Z0-9_]{1,32}\b', '', text)
-            
-            # Step 5: Handle user ID links - complete removal
-            text = re.sub(r'tg://user\?id=\d+', '', text)
-            
-            # Step 6: Handle telegram.me and t.me links
-            text = re.sub(r'(https?://)?(t\.me|telegram\.me)/[a-zA-Z0-9_]+', '', text, flags=re.IGNORECASE)
-            
-            # Clean up formatting issues from removals
-            text = re.sub(r'\s*,\s*,\s*', ', ', text)  # Fix double commas
-            text = re.sub(r'\s*,\s*$', '', text)  # Remove trailing comma
-            text = re.sub(r'^\s*,\s*', '', text)  # Remove leading comma
-            text = re.sub(r'\s*\.\s*\.\s*', '. ', text)  # Fix double periods
-            text = re.sub(r'\s+', ' ', text)  # Multiple spaces to single space
-            text = re.sub(r'\s*\n\s*\n\s*', '\n\n', text)  # Clean up extra newlines but preserve paragraph breaks
-            text = text.strip()
+            # Clean up any excessive empty lines but preserve intentional spacing
+            while '\n\n\n' in result:
+                result = result.replace('\n\n\n', '\n\n')
             
             # If result is empty, return original
-            if not text or text.isspace():
+            if not result or result.isspace():
                 return original_text
             
-            return text
+            return result.strip()
             
         except Exception as e:
             logger.error(f"Error removing mentions: {e}")
