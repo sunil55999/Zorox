@@ -837,7 +837,7 @@ class MessageFilter:
                             if re.match(pattern, line.strip(), re.IGNORECASE | re.MULTILINE):
                                 line_removed = True
                                 headers_removed += 1
-                                logger.debug(f"Header removed: '{line.strip()}' matched pattern: {pattern}")
+                                logger.info(f"Header removed: '{line.strip()}' matched pattern: {pattern}")
                                 break
                         except re.error as regex_error:
                             logger.warning(f"Invalid header regex pattern '{pattern}': {regex_error}")
@@ -909,7 +909,7 @@ class MessageFilter:
                                     filtered_lines.pop(i)
                                     line_removed = True
                                     footers_removed += 1
-                                    logger.debug(f"Footer removed: '{line.strip()}' matched pattern: {pattern}")
+                                    logger.info(f"Footer removed: '{line.strip()}' matched pattern: {pattern}")
                                     break
                         except re.error as regex_error:
                             logger.warning(f"Invalid footer regex pattern '{pattern}': {regex_error}")
