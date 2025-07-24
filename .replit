@@ -5,7 +5,6 @@ channel = "stable-25_05"
 packages = ["freetype", "lcms2", "libimagequant", "libjpeg", "libtiff", "libwebp", "libxcrypt", "openjpeg", "openssl", "sqlite", "tcl", "tk", "zlib"]
 
 [workflows]
-runButton = "Start Bot System"
 
 [[workflows.workflow]]
 name = "Project"
