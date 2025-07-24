@@ -236,13 +236,13 @@ class MessageProcessor:
             return None, []
     
     async def _process_media(self, event, pair: MessagePair, bot: Bot) -> Optional[Any]:
-        """Process media content"""
+        """Process media content with enhanced type detection"""
         try:
             media = event.media
             
             # Check if media type is allowed
             allowed_types = pair.filters.get("allowed_media_types", [
-                "photo", "video", "document", "audio", "voice"
+                "photo", "video", "document", "audio", "voice", "animation", "video_note"
             ])
             
             media_type = self._get_media_type(media)
@@ -251,24 +251,37 @@ class MessageProcessor:
                 return False  # Media blocked
             
             # Special handling for images
-            if isinstance(media, MessageMediaPhoto):
+            if media_type == "photo" or (isinstance(media, MessageMediaDocument) and media_type == "photo"):
                 # Check for duplicate images with phash
                 if await self.image_handler.is_image_blocked(event, pair):
                     logger.debug("Image blocked as duplicate")
                     pair.stats['images_blocked'] = pair.stats.get('images_blocked', 0) + 1
                     return False
             
-            # Download media
-            media_data = await self._download_media(event)
-            if not media_data:
-                logger.warning("Failed to download media")
+            # Download media with proper error handling
+            try:
+                media_data = await self._download_media(event)
+                if not media_data:
+                    logger.warning("Failed to download media")
+                    return None
+            except Exception as download_error:
+                logger.error(f"Media download failed: {download_error}")
                 return None
+            
+            # Get additional media attributes
+            filename = None
+            if hasattr(media, 'document') and hasattr(media.document, 'attributes'):
+                for attr in media.document.attributes:
+                    if hasattr(attr, 'file_name') and attr.file_name:
+                        filename = attr.file_name
+                        break
             
             return {
                 'type': media_type,
                 'data': media_data,
-                'filename': getattr(media, 'file_name', None) if hasattr(media, 'file_name') else None,
-                'caption': event.text or ""
+                'filename': filename,
+                'caption': event.text or "",
+                'original_media': media
             }
             
         except Exception as e:
@@ -296,31 +309,29 @@ class MessageProcessor:
                           entities: List = None):
         """Send message to destination chat with enhanced formatting support"""
         try:
-            # Convert entities for proper formatting and premium emoji support
-            converted_entities = self._convert_entities_for_telegram(entities) if entities else None
+            # Validate and convert entities for proper formatting and premium emoji support
+            converted_entities = self._validate_and_convert_entities(content, entities) if entities else None
             
             if media_info:
                 # Send media message with enhanced content handling
                 caption = content[:1024] if content else None
+                caption_entities = self._validate_and_convert_entities(caption, entities) if caption and entities else None
                 
                 if media_info['type'] == 'photo':
                     return await bot.send_photo(
                         chat_id=chat_id,
                         photo=media_info['data'],
                         caption=caption,
-                        caption_entities=converted_entities,
-                        reply_to_message_id=reply_to_message_id,
-                        disable_web_page_preview=False,  # Allow webpage previews
-                        parse_mode=None  # Use entities instead
+                        caption_entities=caption_entities,
+                        reply_to_message_id=reply_to_message_id
                     )
                 elif media_info['type'] == 'video':
                     return await bot.send_video(
                         chat_id=chat_id,
                         video=media_info['data'],
                         caption=caption,
-                        caption_entities=converted_entities,
-                        reply_to_message_id=reply_to_message_id,
-                        parse_mode=None
+                        caption_entities=caption_entities,
+                        reply_to_message_id=reply_to_message_id
                     )
                 elif media_info['type'] == 'document':
                     return await bot.send_document(
@@ -328,27 +339,38 @@ class MessageProcessor:
                         document=media_info['data'],
                         filename=media_info.get('filename'),
                         caption=caption,
-                        caption_entities=converted_entities,
-                        reply_to_message_id=reply_to_message_id,
-                        parse_mode=None
+                        caption_entities=caption_entities,
+                        reply_to_message_id=reply_to_message_id
                     )
                 elif media_info['type'] == 'audio':
                     return await bot.send_audio(
                         chat_id=chat_id,
                         audio=media_info['data'],
                         caption=caption,
-                        caption_entities=converted_entities,
-                        reply_to_message_id=reply_to_message_id,
-                        parse_mode=None
+                        caption_entities=caption_entities,
+                        reply_to_message_id=reply_to_message_id
                     )
                 elif media_info['type'] == 'voice':
                     return await bot.send_voice(
                         chat_id=chat_id,
                         voice=media_info['data'],
                         caption=caption,
-                        caption_entities=converted_entities,
-                        reply_to_message_id=reply_to_message_id,
-                        parse_mode=None
+                        caption_entities=caption_entities,
+                        reply_to_message_id=reply_to_message_id
+                    )
+                elif media_info['type'] == 'animation':
+                    return await bot.send_animation(
+                        chat_id=chat_id,
+                        animation=media_info['data'],
+                        caption=caption,
+                        caption_entities=caption_entities,
+                        reply_to_message_id=reply_to_message_id
+                    )
+                elif media_info['type'] == 'video_note':
+                    return await bot.send_video_note(
+                        chat_id=chat_id,
+                        video_note=media_info['data'],
+                        reply_to_message_id=reply_to_message_id
                     )
             else:
                 # Send text message with enhanced formatting support
@@ -357,9 +379,8 @@ class MessageProcessor:
                         chat_id=chat_id,
                         text=content,
                         entities=converted_entities,
-                        disable_web_page_preview=False,  # Allow webpage previews
-                        reply_to_message_id=reply_to_message_id,
-                        parse_mode=None  # Use entities for formatting
+                        disable_web_page_preview=False,  # Enable webpage previews
+                        reply_to_message_id=reply_to_message_id
                     )
             
             return None
@@ -368,11 +389,42 @@ class MessageProcessor:
             logger.error(f"Bot forbidden in chat {chat_id}: {e}")
             return None
         except BadRequest as e:
-            logger.error(f"Bad request sending message: {e}")
-            return None
+            logger.warning(f"Bad request sending message, trying fallback: {e}")
+            # Fallback: send without entities if entity parsing fails
+            try:
+                if media_info:
+                    caption = content[:1024] if content else None
+                    if media_info['type'] == 'photo':
+                        return await bot.send_photo(chat_id=chat_id, photo=media_info['data'], caption=caption, reply_to_message_id=reply_to_message_id)
+                    elif media_info['type'] == 'document':
+                        return await bot.send_document(chat_id=chat_id, document=media_info['data'], caption=caption, reply_to_message_id=reply_to_message_id)
+                else:
+                    return await bot.send_message(chat_id=chat_id, text=content, reply_to_message_id=reply_to_message_id, disable_web_page_preview=False)
+            except Exception as fallback_error:
+                logger.error(f"Fallback send also failed: {fallback_error}")
+                return None
         except Exception as e:
             logger.error(f"Error sending message: {e}")
             return None
+
+    def _validate_and_convert_entities(self, text: str, entities: List) -> List:
+        """Validate entities against text and convert them"""
+        if not text or not entities:
+            return []
+        
+        text_length = len(text.encode('utf-16-le')) // 2  # UTF-16 length for Telegram
+        converted_entities = self._convert_entities_for_telegram(entities)
+        
+        # Filter out entities that exceed text bounds
+        valid_entities = []
+        for entity in converted_entities:
+            if hasattr(entity, 'offset') and hasattr(entity, 'length'):
+                if entity.offset + entity.length <= text_length:
+                    valid_entities.append(entity)
+                else:
+                    logger.warning(f"Entity exceeds text bounds: offset={entity.offset}, length={entity.length}, text_length={text_length}")
+        
+        return valid_entities
     
     async def _find_reply_target(self, event, pair: MessagePair) -> Optional[int]:
         """Find the destination message ID for reply"""
@@ -398,24 +450,62 @@ class MessageProcessor:
         return "text"
     
     def _get_media_type(self, media) -> str:
-        """Determine media type"""
-        if isinstance(media, MessageMediaPhoto):
-            return "photo"
-        elif isinstance(media, MessageMediaDocument):
-            if hasattr(media.document, 'mime_type'):
-                mime_type = media.document.mime_type
-                if mime_type.startswith('image/'):
-                    return "photo"
-                elif mime_type.startswith('video/'):
-                    return "video"
-                elif mime_type.startswith('audio/'):
-                    return "audio"
-                elif 'voice' in mime_type.lower():
-                    return "voice"
-                elif 'video_note' in mime_type.lower():
-                    return "video_note"
-            return "document"
-        return "unknown"
+        """Determine media type with enhanced detection"""
+        try:
+            if isinstance(media, MessageMediaPhoto):
+                return "photo"
+            elif isinstance(media, MessageMediaDocument):
+                document = media.document
+                
+                # Check MIME type first
+                if hasattr(document, 'mime_type') and document.mime_type:
+                    mime_type = document.mime_type.lower()
+                    
+                    # Image types
+                    if mime_type.startswith('image/'):
+                        if 'gif' in mime_type:
+                            return "animation"
+                        return "photo"
+                    
+                    # Video types
+                    elif mime_type.startswith('video/'):
+                        return "video"
+                    
+                    # Audio types
+                    elif mime_type.startswith('audio/'):
+                        # Check if it's a voice message
+                        if hasattr(document, 'attributes'):
+                            for attr in document.attributes:
+                                if 'DocumentAttributeAudio' in str(type(attr)):
+                                    if getattr(attr, 'voice', False):
+                                        return "voice"
+                        return "audio"
+                
+                # Check document attributes for more specific type detection
+                if hasattr(document, 'attributes'):
+                    for attr in document.attributes:
+                        attr_type = str(type(attr))
+                        
+                        if 'DocumentAttributeAnimated' in attr_type:
+                            return "animation"
+                        elif 'DocumentAttributeVideo' in attr_type:
+                            if getattr(attr, 'round_message', False):
+                                return "video_note"
+                            return "video"
+                        elif 'DocumentAttributeAudio' in attr_type:
+                            if getattr(attr, 'voice', False):
+                                return "voice"
+                            return "audio"
+                        elif 'DocumentAttributeSticker' in attr_type:
+                            return "sticker"
+                
+                return "document"
+            
+            return "unknown"
+            
+        except Exception as e:
+            logger.error(f"Error determining media type: {e}")
+            return "unknown"
     
     def _remove_mentions(self, text: str, placeholder: str) -> str:
         """Remove mentions from text"""
@@ -459,7 +549,7 @@ class MessageProcessor:
         return text.strip()
     
     def _convert_entities_for_telegram(self, entities: List) -> List:
-        """Convert Telethon entities to python-telegram-bot format"""
+        """Convert Telethon entities to python-telegram-bot format with validation"""
         try:
             from telegram import MessageEntity
             
@@ -469,35 +559,61 @@ class MessageProcessor:
             converted_entities = []
             
             for entity in entities:
-                entity_type = getattr(entity, '__class__', {}).get('__name__', str(type(entity)))
-                offset = getattr(entity, 'offset', 0)
-                length = getattr(entity, 'length', 0)
-                
-                # Map Telethon entity types to Telegram entity types
-                if 'Bold' in entity_type:
-                    converted_entities.append(MessageEntity(MessageEntity.BOLD, offset, length))
-                elif 'Italic' in entity_type:
-                    converted_entities.append(MessageEntity(MessageEntity.ITALIC, offset, length))
-                elif 'Code' in entity_type:
-                    converted_entities.append(MessageEntity(MessageEntity.CODE, offset, length))
-                elif 'Pre' in entity_type:
-                    converted_entities.append(MessageEntity(MessageEntity.PRE, offset, length))
-                elif 'Strike' in entity_type:
-                    converted_entities.append(MessageEntity(MessageEntity.STRIKETHROUGH, offset, length))
-                elif 'Underline' in entity_type:
-                    converted_entities.append(MessageEntity(MessageEntity.UNDERLINE, offset, length))
-                elif 'Spoiler' in entity_type:
-                    converted_entities.append(MessageEntity(MessageEntity.SPOILER, offset, length))
-                elif 'Url' in entity_type:
-                    converted_entities.append(MessageEntity(MessageEntity.URL, offset, length))
-                elif 'TextUrl' in entity_type:
-                    url = getattr(entity, 'url', '')
-                    converted_entities.append(MessageEntity(MessageEntity.TEXT_LINK, offset, length, url=url))
-                elif 'Mention' in entity_type:
-                    converted_entities.append(MessageEntity(MessageEntity.MENTION, offset, length))
-                elif 'CustomEmoji' in entity_type:
-                    custom_emoji_id = getattr(entity, 'document_id', '')
-                    converted_entities.append(MessageEntity(MessageEntity.CUSTOM_EMOJI, offset, length, custom_emoji_id=str(custom_emoji_id)))
+                try:
+                    entity_type = getattr(entity, '__class__', {}).get('__name__', str(type(entity)))
+                    offset = getattr(entity, 'offset', 0)
+                    length = getattr(entity, 'length', 0)
+                    
+                    # Validate entity bounds
+                    if offset < 0 or length <= 0:
+                        continue
+                    
+                    # Map Telethon entity types to Telegram entity types
+                    if 'Bold' in entity_type:
+                        converted_entities.append(MessageEntity(MessageEntity.BOLD, offset, length))
+                    elif 'Italic' in entity_type:
+                        converted_entities.append(MessageEntity(MessageEntity.ITALIC, offset, length))
+                    elif 'Code' in entity_type:
+                        converted_entities.append(MessageEntity(MessageEntity.CODE, offset, length))
+                    elif 'Pre' in entity_type:
+                        language = getattr(entity, 'language', None)
+                        converted_entities.append(MessageEntity(MessageEntity.PRE, offset, length, language=language))
+                    elif 'Strike' in entity_type or 'Strikethrough' in entity_type:
+                        converted_entities.append(MessageEntity(MessageEntity.STRIKETHROUGH, offset, length))
+                    elif 'Underline' in entity_type:
+                        converted_entities.append(MessageEntity(MessageEntity.UNDERLINE, offset, length))
+                    elif 'Spoiler' in entity_type:
+                        converted_entities.append(MessageEntity(MessageEntity.SPOILER, offset, length))
+                    elif 'Url' in entity_type:
+                        converted_entities.append(MessageEntity(MessageEntity.URL, offset, length))
+                    elif 'TextUrl' in entity_type:
+                        url = getattr(entity, 'url', '')
+                        if url:
+                            converted_entities.append(MessageEntity(MessageEntity.TEXT_LINK, offset, length, url=url))
+                    elif 'Mention' in entity_type:
+                        converted_entities.append(MessageEntity(MessageEntity.MENTION, offset, length))
+                    elif 'MentionName' in entity_type:
+                        user_id = getattr(entity, 'user_id', None)
+                        if user_id:
+                            converted_entities.append(MessageEntity(MessageEntity.TEXT_MENTION, offset, length, user=user_id))
+                    elif 'CustomEmoji' in entity_type:
+                        custom_emoji_id = getattr(entity, 'document_id', '')
+                        if custom_emoji_id:
+                            converted_entities.append(MessageEntity(MessageEntity.CUSTOM_EMOJI, offset, length, custom_emoji_id=str(custom_emoji_id)))
+                    elif 'Hashtag' in entity_type:
+                        converted_entities.append(MessageEntity(MessageEntity.HASHTAG, offset, length))
+                    elif 'Cashtag' in entity_type:
+                        converted_entities.append(MessageEntity(MessageEntity.CASHTAG, offset, length))
+                    elif 'BotCommand' in entity_type:
+                        converted_entities.append(MessageEntity(MessageEntity.BOT_COMMAND, offset, length))
+                    elif 'Email' in entity_type:
+                        converted_entities.append(MessageEntity(MessageEntity.EMAIL, offset, length))
+                    elif 'Phone' in entity_type:
+                        converted_entities.append(MessageEntity(MessageEntity.PHONE_NUMBER, offset, length))
+                        
+                except Exception as entity_error:
+                    logger.warning(f"Failed to convert entity {entity_type}: {entity_error}")
+                    continue
             
             return converted_entities
             

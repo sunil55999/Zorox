@@ -195,3 +195,8 @@ The system follows a modular, async-first architecture with clear separation of 
 - **Database cleanup methods**: Added `cleanup_old_messages`, `cleanup_old_errors`, `count_old_messages`, `count_old_errors`
 - **Orphaned hash cleanup**: Implemented `cleanup_orphaned_hashes` in image handler for database optimization
 - **Error rate optimization**: System health monitoring improvements to reduce false alerts
+- **Critical entity parsing fix**: Fixed entity validation and conversion for proper message formatting
+- **Image forwarding repair**: Enhanced media type detection and download handling for all media types
+- **Premium content preservation**: Improved entity bounds checking and fallback mechanisms for premium emojis
+- **Webpage preview enablement**: Removed disable_web_page_preview restrictions for proper link previews
+- **Entity bounds validation**: Added text length validation to prevent entity parsing errors

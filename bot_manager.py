@@ -794,7 +794,7 @@ class BotManager:
 ✅ Comprehensive statistics and auto-cleanup
         """
         
-        await update.message.reply_text(help_text, parse_mode='Markdown')
+        await update.message.reply_text(help_text, parse_mode=None)
     
     async def _cmd_status(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Status command handler"""
