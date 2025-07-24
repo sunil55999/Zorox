@@ -738,50 +738,41 @@ class MessageFilter:
         try:
             original_text = text
             
-            # Comprehensive mention patterns covering all edge cases
-            mention_patterns = [
-                # Mentions in parentheses like (@xyz) - handle before standard patterns
-                r'\(@[a-zA-Z0-9_]+\)',
-                # Mentions with dots like .@xyz
-                r'\.@[a-zA-Z0-9_]+',
-                # Standard @username patterns (letters, numbers, underscores)
-                r'@[a-zA-Z0-9_]+',
-                # User links with IDs
-                r'tg://user\?id=\d+',
-            ]
+            # Step 1: Handle mentions in parentheses - remove entire parentheses
+            text = re.sub(r'\(\s*@[a-zA-Z0-9_]{1,32}\s*\)', '', text)
             
-            # Apply patterns strategically to handle edge cases
-            for pattern in mention_patterns:
-                if pattern == r'\(@[a-zA-Z0-9_]+\)':
-                    # Replace parentheses mentions, remove parentheses
-                    text = re.sub(pattern, placeholder, text)
-                elif pattern == r'\.@[a-zA-Z0-9_]+':
-                    # Replace dot mentions, remove dot
-                    text = re.sub(pattern, placeholder, text)
-                else:
-                    # Standard patterns
-                    text = re.sub(pattern, placeholder, text)
+            # Step 2: Handle @mentions preceded by punctuation - clean up punctuation  
+            text = re.sub(r'([,\.;:!?]\s*)@[a-zA-Z0-9_]{1,32}\b', r'\1', text)
             
-            # Clean up multiple spaces and formatting issues
-            # Remove duplicate placeholders
-            text = re.sub(f'{re.escape(placeholder)}(\\s*{re.escape(placeholder)})+', placeholder, text)
+            # Step 3: Handle standard @mentions (but not email addresses) - replace with placeholder or remove
+            if placeholder:
+                # Match @mentions at word boundaries, but not after alphanumeric chars (emails)
+                text = re.sub(r'(?<!\w)@[a-zA-Z0-9_]{1,32}\b', placeholder, text)
+            else:
+                text = re.sub(r'(?<!\w)@[a-zA-Z0-9_]{1,32}\b', '', text)
             
-            # Clean up extra spaces around placeholders
-            text = re.sub(f'\\s+{re.escape(placeholder)}\\s+', f' {placeholder} ', text)
-            text = re.sub(f'^\\s*{re.escape(placeholder)}\\s*', f'{placeholder} ', text)
-            text = re.sub(f'\\s*{re.escape(placeholder)}\\s*$', f' {placeholder}', text)
+            # Step 4: Handle user ID links
+            text = re.sub(r'tg://user\?id=\d+', placeholder if placeholder else '', text)
             
-            # Clean up multiple spaces
-            text = re.sub(r'\s+', ' ', text)
+            # Clean up formatting issues
+            if placeholder:
+                # Remove duplicate placeholders
+                text = re.sub(f'{re.escape(placeholder)}(\\s*{re.escape(placeholder)})+', placeholder, text)
+                # Clean up extra spaces around placeholders
+                text = re.sub(f'\\s+{re.escape(placeholder)}\\s+', f' {placeholder} ', text)
+                text = re.sub(f'^\\s*{re.escape(placeholder)}\\s*', f'{placeholder} ', text)
+                text = re.sub(f'\\s*{re.escape(placeholder)}\\s*$', f' {placeholder}', text)
             
-            # Remove leading/trailing spaces
+            # Clean up excessive spaces and trailing punctuation left behind
+            text = re.sub(r'\s*,\s*,\s*', ', ', text)  # Fix double commas
+            text = re.sub(r'\s*,\s*$', '', text)  # Remove trailing comma
+            text = re.sub(r'^\s*,\s*', '', text)  # Remove leading comma
+            text = re.sub(r'\s+', ' ', text)  # Multiple spaces to single space
             text = text.strip()
             
-            # If placeholder removal left empty text, return original
-            if not text or text == placeholder:
-                placeholder_only_pattern = f'^\\s*{re.escape(placeholder)}\\s*$'
-                if re.match(placeholder_only_pattern, text):
-                    return original_text
+            # If result is empty or only placeholder, return original
+            if not text or (placeholder and text == placeholder):
+                return original_text
             
             return text
             
@@ -790,7 +781,7 @@ class MessageFilter:
             return text
     
     def _remove_headers(self, text: str, patterns: List[str]) -> str:
-        """Enhanced header removal with exact text matching and formatting preservation"""
+        """Enhanced header removal with exact phrase matching at beginning of message"""
         try:
             if not text:
                 return text
@@ -801,45 +792,51 @@ class MessageFilter:
             if not patterns:
                 # More conservative default patterns for exact header removal
                 exact_header_patterns = [
-                    r'^🔥\s*VIP\s*ENTRY.*?$',      # Exact: "🔥 VIP ENTRY:"
-                    r'^📢\s*SIGNAL\s*ALERT.*?$',   # Exact: "📢 SIGNAL ALERT"
-                    r'^VIP\s*Channel.*?$',         # Exact: "VIP Channel:"
-                    r'^📊\s*Analysis.*?$',         # Exact: "📊 Analysis"
-                    r'^🚨\s*Alert.*?$',            # Exact: "🚨 Alert"
+                    r'^🔥\s*VIP\s*ENTRY\b.*?$',      # Exact: "🔥 VIP ENTRY"
+                    r'^📢\s*SIGNAL\s*ALERT\b.*?$',   # Exact: "📢 SIGNAL ALERT"
+                    r'^VIP\s*Channel\b.*?$',         # Exact: "VIP Channel"
+                    r'^📊\s*Analysis\b.*?$',         # Exact: "📊 Analysis"
+                    r'^🚨\s*Alert\b.*?$',            # Exact: "🚨 Alert"
+                    r'^🔚\s*END\b.*?$',              # Exact: "🔚 END"
                 ]
                 patterns = exact_header_patterns
             
-            # Apply patterns with line-by-line precision
+            # Process headers at beginning of message only
             lines = text.split('\n')
             filtered_lines = []
+            header_section = True  # Track if we're still in header section
             
             for line in lines:
                 line_removed = False
                 
-                # Check each pattern against the current line
-                for pattern in patterns:
-                    try:
-                        # Compile with case-insensitive matching for flexibility
-                        compiled_pattern = re.compile(pattern, re.IGNORECASE)
-                        
-                        # Check if this line matches the header pattern
-                        if compiled_pattern.match(line):
-                            line_removed = True
-                            logger.debug(f"Header removed: '{line}' matched pattern: {pattern}")
-                            break
-                    except re.error as regex_error:
-                        logger.warning(f"Invalid header regex pattern '{pattern}': {regex_error}")
-                        continue
+                # Only check for headers at the beginning of the message
+                if header_section and line.strip():
+                    # Check each pattern against the current line
+                    for pattern in patterns:
+                        try:
+                            # Create exact match pattern for headers
+                            # Match the exact phrase at start of line
+                            if re.match(pattern, line.strip(), re.IGNORECASE):
+                                line_removed = True
+                                logger.debug(f"Header removed: '{line}' matched pattern: {pattern}")
+                                break
+                        except re.error as regex_error:
+                            logger.warning(f"Invalid header regex pattern '{pattern}': {regex_error}")
+                            continue
+                    
+                    # Once we encounter a non-header line, stop looking for headers
+                    if not line_removed:
+                        header_section = False
                 
-                # Only keep lines that don't match any header pattern
+                # Keep lines that don't match header patterns
                 if not line_removed:
                     filtered_lines.append(line)
             
-            # Rejoin lines preserving original structure
+            # Rejoin lines preserving original formatting
             result_text = '\n'.join(filtered_lines)
             
-            # Clean up leading/trailing whitespace but preserve internal newlines
-            result_text = result_text.strip()
+            # Clean up leading whitespace but preserve formatting
+            result_text = result_text.lstrip()
             
             # If result is empty or only whitespace, return original
             if not result_text or result_text.isspace():
@@ -852,7 +849,7 @@ class MessageFilter:
             return text
     
     def _remove_footers(self, text: str, patterns: List[str]) -> str:
-        """Enhanced footer removal with exact text matching and formatting preservation"""
+        """Enhanced footer removal with exact phrase matching at end of message"""
         try:
             if not text:
                 return text
@@ -863,53 +860,57 @@ class MessageFilter:
             if not patterns:
                 # More conservative default patterns for exact footer removal
                 exact_footer_patterns = [
-                    r'\n.*?🔚\s*END.*?$',          # Exact: "🔚 END"
-                    r'\n.*?👉\s*Join.*?$',         # Exact: "👉 Join our VIP channel"
-                    r'\n.*?Contact\s*@admin.*?$',  # Exact: "Contact @admin for more info"
-                    r'\n.*?📱\s*Contact.*?$',      # Exact: "📱 Contact us"
-                    r'\n.*?💌\s*Subscribe.*?$',    # Exact: "💌 Subscribe to"
+                    r'^🔚\s*END\b.*?$',              # Exact: "🔚 END"
+                    r'^👉\s*Join\b.*?$',             # Exact: "👉 Join our VIP channel"
+                    r'^Contact\s*@admin\b.*?$',      # Exact: "Contact @admin for more info"
+                    r'^📱\s*Contact\b.*?$',          # Exact: "📱 Contact us"
+                    r'^💌\s*Subscribe\b.*?$',        # Exact: "💌 Subscribe to"
                 ]
                 patterns = exact_footer_patterns
             
-            # Apply patterns working from the end backwards to preserve content
+            # Process footers at end of message only
             lines = text.split('\n')
-            filtered_lines = list(lines)  # Copy the lines
+            filtered_lines = list(lines)
             
             # Process lines from bottom to top to remove footers cleanly
+            footer_section = True  # Track if we're still in footer section
+            
             for i in range(len(lines) - 1, -1, -1):
                 line = lines[i]
                 line_removed = False
                 
-                # Check each pattern against the current line
-                for pattern in patterns:
-                    try:
-                        # Compile with case-insensitive matching for flexibility
-                        compiled_pattern = re.compile(pattern, re.IGNORECASE | re.MULTILINE)
-                        
-                        # Create a test string with newline prefix for footer patterns
-                        test_string = '\n' + line
-                        
-                        # Check if this line matches the footer pattern
-                        if compiled_pattern.search(test_string):
-                            # Remove this line from the filtered list
-                            if i < len(filtered_lines):
-                                filtered_lines.pop(i)
-                                line_removed = True
-                                logger.debug(f"Footer removed: '{line}' matched pattern: {pattern}")
-                                break
-                    except re.error as regex_error:
-                        logger.warning(f"Invalid footer regex pattern '{pattern}': {regex_error}")
-                        continue
-                
-                # If we removed a footer line, continue checking from this position
-                if line_removed:
-                    break
+                # Only check for footers at the end of the message
+                if footer_section and line.strip():
+                    # Check each pattern against the current line
+                    for pattern in patterns:
+                        try:
+                            # Create exact match pattern for footers
+                            # Match the exact phrase at start of line (footers are typically single lines)
+                            if re.match(pattern, line.strip(), re.IGNORECASE):
+                                # Remove this line from the filtered list
+                                if i < len(filtered_lines):
+                                    filtered_lines.pop(i)
+                                    line_removed = True
+                                    logger.debug(f"Footer removed: '{line}' matched pattern: {pattern}")
+                                    break
+                        except re.error as regex_error:
+                            logger.warning(f"Invalid footer regex pattern '{pattern}': {regex_error}")
+                            continue
+                    
+                    # Once we encounter a non-footer line, stop looking for footers
+                    if not line_removed:
+                        footer_section = False
+                # Skip empty lines while in footer section
+                elif not line.strip():
+                    continue
+                else:
+                    footer_section = False
             
-            # Rejoin lines preserving original structure  
+            # Rejoin lines preserving original formatting
             result_text = '\n'.join(filtered_lines)
             
-            # Clean up leading/trailing whitespace but preserve internal newlines
-            result_text = result_text.strip()
+            # Clean up trailing whitespace but preserve formatting
+            result_text = result_text.rstrip()
             
             # If result is empty or only whitespace, return original
             if not result_text or result_text.isspace():
