@@ -165,6 +165,23 @@ The system follows a modular, async-first architecture with clear separation of 
 
 ## Recent Changes
 
+### 2025-07-24: MENTION & HEADER/FOOTER FILTERING FIXES - COMPLETED ✅
+- ✅ **Complete Mention Removal**: Fixed mention removal to completely remove @username mentions without leaving any placeholders
+  - No more `[User]` remarks - mentions are completely removed from messages
+  - Enhanced pattern matching for @username, (@username), tg://user?id=, and t.me/ links
+  - Improved cleanup of leftover punctuation and spacing after mention removal
+  - All mention removal now results in clean, readable text without placeholder artifacts
+- ✅ **Targeted Header/Footer Removal**: Fixed header/footer removal to preserve message structure
+  - Only removes matching patterns from beginning (headers) or end (footers) of messages
+  - Preserves all content structure, formatting, and readability
+  - No longer breaks message formatting or removes unrelated content
+  - Conservative approach that maintains original message if removal would result in empty content
+- ✅ **Database Configuration**: Updated mention placeholder to empty string for complete removal
+- ✅ **Comprehensive Testing**: All fixes verified with real-world trading signal examples
+  - 100% success rate for mention removal without placeholders
+  - 100% success rate for targeted header/footer removal preserving message structure
+  - Trading content and formatting fully preserved through all filtering operations
+
 ### 2025-07-24: FILTERING SYSTEM FULLY OPERATIONAL - COMPLETED ✅
 - ✅ **Mention Removal System**: 100% operational with comprehensive edge case handling
   - Perfect handling of @username, @user_name123, @__bot__ patterns (3/3 tests passed)
