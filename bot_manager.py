@@ -1329,7 +1329,7 @@ class BotManager:
             
             # System paused status
             paused = await self.db_manager.get_setting("system_paused", "false")
-            pause_status = "⏸️ Paused" if paused.lower() == "true" else "▶️ Running"
+            pause_status = "⏸️ Paused" if paused and paused.lower() == "true" else "▶️ Running"
             diagnostics.append(f"⚙️ System: {pause_status}")
             
             diagnostics_text = f"🔍 **System Diagnostics**\n\n" + "\n".join(diagnostics)
@@ -1374,7 +1374,7 @@ class BotManager:
             return
         
         try:
-            if len(context.args) < 2:
+            if not context.args or len(context.args) < 2:
                 await update.message.reply_text("Usage: /set <setting> <value>")
                 return
             
@@ -1466,11 +1466,11 @@ Use `/cleanup --force` to proceed with cleanup.
     # Advanced filtering command handlers
     async def _cmd_block_word(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Block word globally or for specific pair"""
-        if not self._is_admin(update.effective_user.id):
+        if not update.effective_user or not self._is_admin(update.effective_user.id):
             return
         
         try:
-            if len(context.args) < 1:
+            if not context.args or len(context.args) < 1:
                 await update.message.reply_text(
                     "Usage: /blockword <word> [pair_id]\n"
                     "Without pair_id, blocks globally"
@@ -1479,7 +1479,7 @@ Use `/cleanup --force` to proceed with cleanup.
             
             word = context.args[0]
             
-            if len(context.args) > 1:
+            if context.args and len(context.args) > 1:
                 # Block for specific pair
                 pair_id = int(context.args[1])
                 success = await self.message_filter.add_pair_word_block(pair_id, word)
@@ -1499,11 +1499,11 @@ Use `/cleanup --force` to proceed with cleanup.
     
     async def _cmd_unblock_word(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Unblock word globally or for specific pair"""
-        if not self._is_admin(update.effective_user.id):
+        if not update.effective_user or not self._is_admin(update.effective_user.id):
             return
         
         try:
-            if len(context.args) < 1:
+            if not context.args or len(context.args) < 1:
                 await update.message.reply_text(
                     "Usage: /unblockword <word> [pair_id]\n"
                     "Without pair_id, unblocks globally"
@@ -1512,7 +1512,7 @@ Use `/cleanup --force` to proceed with cleanup.
             
             word = context.args[0]
             
-            if len(context.args) > 1:
+            if context.args and len(context.args) > 1:
                 # Unblock for specific pair
                 pair_id = int(context.args[1])
                 success = await self.message_filter.remove_pair_word_block(pair_id, word)
@@ -1573,10 +1573,13 @@ Use `/cleanup --force` to proceed with cleanup.
     
     async def _cmd_block_image(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Block image by replying to it"""
-        if not self._is_admin(update.effective_user.id):
+        if not update.effective_user or not self._is_admin(update.effective_user.id):
             return
         
         try:
+            if not update.message:
+                return
+            
             reply_msg = update.message.reply_to_message
             if not reply_msg or not reply_msg.photo:
                 await update.message.reply_text(
@@ -1610,10 +1613,13 @@ Use `/cleanup --force` to proceed with cleanup.
             mock_event = MockEvent(reply_msg)
             pair = self.pairs.get(pair_id) if pair_id else None
             
-            success = await self.image_handler.add_image_block(
-                mock_event, pair, description, 
-                str(update.effective_user.id), block_scope
-            )
+            if update.effective_user:
+                success = await self.image_handler.add_image_block(
+                    mock_event, pair, description, 
+                    str(update.effective_user.id), block_scope
+                )
+            else:
+                success = False
             
             if success:
                 scope_text = f"for pair {pair_id}" if block_scope == "pair" else "globally"
@@ -1851,8 +1857,11 @@ Use `/cleanup --force` to proceed with cleanup.
         except Exception as e:
             await update.message.reply_text(f"Error testing filter: {e}")
     
-    def _is_admin(self, user_id: int) -> bool:
+    def _is_admin(self, user_id: Optional[int]) -> bool:
         """Check if user is admin"""
+        if user_id is None:
+            return False
+        
         # If no admin users configured, allow all users for initial setup
         if not self.config.ADMIN_USER_IDS:
             logger.warning(f"No admin users configured, allowing user {user_id} for setup")
