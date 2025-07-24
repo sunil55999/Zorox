@@ -298,8 +298,8 @@ class MessageFilter:
         if isinstance(media, MessageMediaPhoto):
             return "photo"
         elif isinstance(media, MessageMediaDocument):
-            if hasattr(media, 'document') and media.document and hasattr(media.document, 'mime_type') and media.document.mime_type:
-                mime_type = media.document.mime_type
+            if hasattr(media, 'document') and media.document and hasattr(media.document, 'mime_type'):
+                mime_type = getattr(media.document, 'mime_type', '')
                 if mime_type.startswith('image/'):
                     return "photo"
                 elif mime_type.startswith('video/'):
@@ -738,6 +738,8 @@ class MessageFilter:
     
     def _remove_mentions(self, text: str, placeholder: str = "[User]") -> str:
         """Remove mentions from text and replace with placeholder"""
+        if not text:
+            return text
         try:
             # Remove @username mentions
             text = re.sub(r'@\w+', placeholder, text)

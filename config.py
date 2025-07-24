@@ -32,8 +32,8 @@ class Config:
         self.REDIS_URL = os.getenv('REDIS_URL', "redis://localhost:6379")
         self.USE_REDIS = os.getenv('USE_REDIS', 'false').lower() == 'true'
         
-        # System settings optimized for 80-90 pairs
-        self.MAX_WORKERS = int(os.getenv('MAX_WORKERS', '20'))  # Increased for many pairs
+        # System settings optimized for 100+ pairs
+        self.MAX_WORKERS = int(os.getenv('MAX_WORKERS', '50'))  # Increased for 100+ pairs
         self.DEBUG_MODE = os.getenv('DEBUG_MODE', 'false').lower() == 'true'
         self.SIMILARITY_THRESHOLD = int(os.getenv('SIMILARITY_THRESHOLD', '5'))
         
@@ -41,11 +41,16 @@ class Config:
         self.DATABASE_PATH = os.getenv('DATABASE_PATH', 'bot.db')
         self.DATABASE_BACKUP_INTERVAL = int(os.getenv('DATABASE_BACKUP_INTERVAL', '3600'))
         
-        # Performance settings optimized for high throughput
-        self.MESSAGE_QUEUE_SIZE = int(os.getenv('MESSAGE_QUEUE_SIZE', '5000'))  # Larger queue
-        self.MAX_RETRIES = int(os.getenv('MAX_RETRIES', '3'))
-        self.RETRY_DELAY = float(os.getenv('RETRY_DELAY', '0.5'))  # Faster retries
-        self.BATCH_SIZE = int(os.getenv('BATCH_SIZE', '25'))  # Process in batches
+        # Performance settings optimized for high throughput with 100+ pairs
+        self.MESSAGE_QUEUE_SIZE = int(os.getenv('MESSAGE_QUEUE_SIZE', '50000'))  # Massive queue for 100+ pairs
+        self.MAX_RETRIES = int(os.getenv('MAX_RETRIES', '5'))  # More retries for reliability
+        self.RETRY_DELAY = float(os.getenv('RETRY_DELAY', '0.3'))  # Faster retries for high volume
+        self.BATCH_SIZE = int(os.getenv('BATCH_SIZE', '50'))  # Larger batches for efficiency
+        
+        # Connection pooling and optimization for high scale
+        self.CONNECTION_POOL_SIZE = int(os.getenv('CONNECTION_POOL_SIZE', '100'))
+        self.MAX_CONCURRENT_DOWNLOADS = int(os.getenv('MAX_CONCURRENT_DOWNLOADS', '25'))  # Enhanced for media processing
+        self.CHUNK_PROCESSING_SIZE = int(os.getenv('CHUNK_PROCESSING_SIZE', '10'))  # Process pairs in chunks
         
         # Rate limiting
         self.RATE_LIMIT_MESSAGES = int(os.getenv('RATE_LIMIT_MESSAGES', '30'))
@@ -120,12 +125,12 @@ class Config:
             logger.warning("ADMIN_BOT_TOKEN not set - admin commands will not be available")
         
         # Validate numeric ranges for high-scale operation
-        if self.MAX_WORKERS < 1 or self.MAX_WORKERS > 100:  # Allow more workers
-            errors.append("MAX_WORKERS must be between 1 and 100")
+        if self.MAX_WORKERS < 1 or self.MAX_WORKERS > 200:  # Allow more workers for 100+ pairs
+            errors.append("MAX_WORKERS must be between 1 and 200")
         if self.SIMILARITY_THRESHOLD < 1 or self.SIMILARITY_THRESHOLD > 20:
             errors.append("SIMILARITY_THRESHOLD must be between 1 and 20")
-        if self.MESSAGE_QUEUE_SIZE < 1000:  # Minimum queue for many pairs
-            errors.append("MESSAGE_QUEUE_SIZE must be at least 1000")
+        if self.MESSAGE_QUEUE_SIZE < 5000:  # Optimal queue for 100+ pairs 
+            logger.warning(f"MESSAGE_QUEUE_SIZE is {self.MESSAGE_QUEUE_SIZE}, consider increasing to 50000+ for optimal 100+ pairs performance")
         
         if errors:
             for error in errors:

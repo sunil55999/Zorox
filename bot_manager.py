@@ -187,7 +187,8 @@ class BotManager:
                 self.config.API_HASH
             )
             
-            await self.telethon_client.start(phone=self.config.PHONE_NUMBER)
+            if self.telethon_client:
+                await self.telethon_client.start(phone=self.config.PHONE_NUMBER)
             logger.info("Telethon client initialized")
             
             # Setup message handlers
@@ -305,9 +306,10 @@ class BotManager:
                 logger.info("Started admin bot application")
                 
                 # Start polling for admin bot to receive commands
-                admin_task = asyncio.create_task(self.admin_application.updater.start_polling())
-                self.worker_tasks.append(admin_task)
-                logger.info("Started admin bot polling")
+                if self.admin_application.updater:
+                    admin_task = asyncio.create_task(self.admin_application.updater.start_polling())
+                    self.worker_tasks.append(admin_task)
+                    logger.info("Started admin bot polling")
             
             # Start message sending bot applications
             for i, app in enumerate(self.bot_applications):
@@ -724,9 +726,11 @@ class BotManager:
     async def _cmd_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Start command handler"""
         if not update.effective_user or not self._is_admin(update.effective_user.id):
-            await update.message.reply_text("❌ You are not authorized to use this bot.")
+            if update.message:
+                await update.message.reply_text("❌ You are not authorized to use this bot.")
             return
-        await update.message.reply_text(
+        if update.message:
+            await update.message.reply_text(
             "🤖 Telegram Message Copying Bot\n\n"
             "Available commands:\n"
             "/status - System status\n"
@@ -740,6 +744,8 @@ class BotManager:
     async def _cmd_help(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Help command handler"""
         if not update.effective_user or not self._is_admin(update.effective_user.id):
+            return
+        if not update.message:
             return
         
         help_text = """
@@ -917,29 +923,37 @@ class BotManager:
     
     async def _cmd_pause(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Pause system command handler"""
-        if not self._is_admin(update.effective_user.id):
+        if not update.effective_user or not self._is_admin(update.effective_user.id):
+            return
+        if not update.message:
             return
         
         try:
             await self.db_manager.set_setting("system_paused", "true")
-            await update.message.reply_text("⏸️ System paused. Use /resume to continue.")
+            if update.message:
+                await update.message.reply_text("⏸️ System paused. Use /resume to continue.")
             logger.info(f"System paused by user {update.effective_user.id}")
             
         except Exception as e:
-            await update.message.reply_text(f"Error pausing system: {e}")
+            if update.message:
+                await update.message.reply_text(f"Error pausing system: {e}")
     
     async def _cmd_resume(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Resume system command handler"""
-        if not self._is_admin(update.effective_user.id):
+        if not update.effective_user or not self._is_admin(update.effective_user.id):
+            return
+        if not update.message:
             return
         
         try:
             await self.db_manager.set_setting("system_paused", "false")
-            await update.message.reply_text("▶️ System resumed.")
+            if update.message:
+                await update.message.reply_text("▶️ System resumed.")
             logger.info(f"System resumed by user {update.effective_user.id}")
             
         except Exception as e:
-            await update.message.reply_text(f"Error resuming system: {e}")
+            if update.message:
+                await update.message.reply_text(f"Error resuming system: {e}")
     
     async def _cmd_add_pair(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Add pair command handler with optional bot token selection"""

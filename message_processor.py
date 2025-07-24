@@ -1008,6 +1008,48 @@ class MessageProcessor:
                             return True
         
         return False
+
+    def _remove_mentions_from_text(self, text: str, placeholder: str = "[User]") -> str:
+        """Remove mentions from text and replace with placeholder"""
+        if not text:
+            return text
+        
+        # Pattern to match @username mentions  
+        mention_pattern = r'@\w+'
+        return re.sub(mention_pattern, placeholder, text)
+    
+    def _remove_header_footer(self, text: str, header_pattern: str = None, footer_pattern: str = None) -> str:
+        """Remove header and footer from text using regex patterns"""
+        if not text:
+            return text
+        
+        filtered_text = text
+        
+        # Remove header
+        if header_pattern:
+            try:
+                compiled_header = re.compile(header_pattern, re.IGNORECASE | re.MULTILINE)
+                match = compiled_header.search(filtered_text)
+                if match:
+                    # Remove header
+                    header_end = match.end()
+                    filtered_text = filtered_text[header_end:].strip()
+            except re.error as e:
+                logger.warning(f"Invalid header regex pattern {header_pattern}: {e}")
+        
+        # Remove footer
+        if footer_pattern:
+            try:
+                compiled_footer = re.compile(footer_pattern, re.IGNORECASE | re.MULTILINE)
+                match = compiled_footer.search(filtered_text)
+                if match:
+                    # Remove footer
+                    footer_start = match.start()
+                    filtered_text = filtered_text[:footer_start].strip()
+            except re.error as e:
+                logger.warning(f"Invalid footer regex pattern {footer_pattern}: {e}")
+        
+        return filtered_text
     
     def _contains_urls(self, text: str) -> bool:
         """Check if text contains URLs that should have webpage previews"""
