@@ -111,7 +111,7 @@ class MessageProcessor:
             # Send message with full entity preservation and proper URL preview handling
             sent_message = await self._send_message(
                 bot, pair.destination_chat_id, processed_content or "", 
-                media_info, reply_to_message_id, processed_entities or [], enable_webpage_preview
+                media_info, reply_to_message_id, processed_entities or []
             )
             
             if sent_message:
@@ -476,7 +476,7 @@ class MessageProcessor:
 
     async def _send_message(self, bot: Bot, chat_id: int, content: str, 
                           media_info: Optional[Dict], reply_to_message_id: Optional[int] = None,
-                          entities: Optional[List] = None, enable_webpage_preview: bool = True):
+                          entities: Optional[List] = None):
         """Send message to destination chat with comprehensive media and formatting support"""
         try:
             # Validate and convert entities for proper formatting and premium emoji support  
@@ -621,6 +621,7 @@ class MessageProcessor:
             else:
                 # Send text message with enhanced formatting support and URL preview handling
                 if content:
+                    logger.debug(f"Sending text message with URL preview enabled: {self._contains_urls(content)}")
                     return await bot.send_message(
                         chat_id=chat_id,
                         text=content,
