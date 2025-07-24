@@ -201,11 +201,19 @@ The system follows a modular, async-first architecture with clear separation of 
 - **Webpage preview enablement**: Removed disable_web_page_preview restrictions for proper link previews
 - **Entity bounds validation**: Added text length validation to prevent entity parsing errors
 
-### 2025-07-24: Complete Message Forwarding System Rewrite
-- **Comprehensive entity system**: Completely rewritten entity conversion with safe type detection and comprehensive bounds checking
-- **Enhanced media processing**: Added support for all media types including animations, video notes, stickers with attribute preservation
-- **Web page preview support**: Full MessageMediaWebPage handling with proper URL extraction and preview enablement
-- **Robust fallback mechanisms**: Multi-level fallback strategies for reliable message delivery even with entity errors
-- **Media download resilience**: Added retry logic and comprehensive error handling for media downloads
-- **UTF-16 entity validation**: Proper text length calculation and entity adjustment for Telegram's UTF-16 encoding
-- **Premium content preservation**: Enhanced custom emoji and premium sticker support with proper document ID handling
+### 2025-07-24: Message Formatting and Media Forwarding Fixes
+- **Fixed message formatting preservation**: Implemented proper entity handling to preserve original formatting (bold, italic, underline, emojis) without adding unnecessary asterisks or corrupting markdown
+- **Enhanced direct forwarding**: Added `event.forward_to()` support for media messages to maintain perfect formatting and media quality preservation
+- **Comprehensive media support**: Fixed handling of all media types including photos, videos, documents, stickers, animations, voice messages, and video notes
+- **Webpage preview enablement**: Fixed webpage previews by setting `disable_web_page_preview=False` in both message sending and editing functions
+- **Robust document attribute handling**: Added safe attribute access with `getattr()` to prevent type errors when processing Telethon document attributes
+- **Entity conversion improvements**: Enhanced Telethon-to-Bot API entity mapping with comprehensive bounds checking and fallback handling
+- **Statistics type safety**: Fixed all dictionary key type conflicts in pair statistics to prevent runtime errors
+- **Original formatting preservation**: Added `preserve_original_formatting` filter to maintain Discord-like and emoji-heavy message structure without modification
+
+#### Technical Implementation Details:
+- Uses `event.raw_text` instead of processed text for better formatting preservation
+- Implements multi-level fallback: Direct forwarding → Bot API with entities → Plain text as last resort
+- Safely handles all Telethon document attribute types (DocumentAttributeFilename, DocumentAttributeVideo, etc.)
+- Validates entity bounds against UTF-16 text length for Telegram compatibility
+- Maintains original message spacing, emojis, and formatting without double-wrapping

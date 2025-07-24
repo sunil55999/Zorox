@@ -46,7 +46,7 @@ class MessageProcessor:
         await self.message_filter.initialize()
     
     async def process_new_message(self, event, pair: MessagePair, bot: Bot, bot_index: int) -> bool:
-        """Process new message from source chat"""
+        """Process new message from source chat with enhanced formatting and media support"""
         try:
             self.stats['messages_processed'] += 1
             
@@ -61,31 +61,68 @@ class MessageProcessor:
                 await self.db_manager.update_pair(pair)
                 return True  # Successfully filtered (not an error)
             
-            # Process message content with entities
-            processed_content, processed_entities = await self._process_message_content(event, pair)
-            if not processed_content:
-                logger.warning("Failed to process message content")
-                return False
+            # Handle replies first
+            reply_to_message_id = None
+            if event.is_reply and pair.filters.get("preserve_replies", True):
+                reply_to_message_id = await self._find_reply_target(event, pair)
             
-            # Handle media if present
+            # Try direct forwarding for media messages when possible
+            if event.media and pair.filters.get("use_direct_forwarding", True):
+                try:
+                    # Attempt direct forwarding (preserves all formatting and media perfectly)
+                    forwarded_message = await event.forward_to(pair.destination_chat_id)
+                    if forwarded_message:
+                        # Save message mapping
+                        mapping = MessageMapping(
+                            id=0,
+                            source_message_id=event.id,
+                            destination_message_id=forwarded_message.id,
+                            pair_id=pair.id,
+                            bot_index=bot_index,
+                            source_chat_id=pair.source_chat_id,
+                            destination_chat_id=pair.destination_chat_id,
+                            message_type=self._get_message_type(event),
+                            has_media=bool(event.media),
+                            is_reply=bool(reply_to_message_id),
+                            reply_to_source_id=event.reply_to_msg_id if event.is_reply else None,
+                            reply_to_dest_id=reply_to_message_id
+                        )
+                        
+                        await self.db_manager.save_message_mapping(mapping)
+                        
+                        # Update statistics
+                        self.stats['messages_copied'] += 1
+                        pair.stats['messages_copied'] = pair.stats.get('messages_copied', 0) + 1
+                        pair.stats['last_activity'] = datetime.now().isoformat()
+                        self.stats['media_processed'] += 1
+                        
+                        if reply_to_message_id:
+                            pair.stats['replies_preserved'] = pair.stats.get('replies_preserved', 0) + 1
+                        
+                        await self.db_manager.update_pair(pair)
+                        
+                        logger.debug(f"Message forwarded directly: {event.id} -> {forwarded_message.id}")
+                        return True
+                except Exception as forward_error:
+                    logger.debug(f"Direct forwarding failed, falling back to bot API: {forward_error}")
+            
+            # Process message content with entities (preserve original formatting)
+            processed_content, processed_entities = await self._process_message_content(event, pair)
+            
+            # Handle media if present (fallback when direct forwarding failed or disabled)
             media_info = None
             if event.media:
                 media_info = await self._process_media(event, pair, bot)
                 if media_info is False:  # Media blocked
                     self.stats['messages_filtered'] += 1
-                    pair.stats['messages_filtered'] += 1
+                    pair.stats['messages_filtered'] = pair.stats.get('messages_filtered', 0) + 1
                     await self.db_manager.update_pair(pair)
                     return True
             
-            # Handle replies
-            reply_to_message_id = None
-            if event.is_reply and pair.filters.get("preserve_replies", True):
-                reply_to_message_id = await self._find_reply_target(event, pair)
-            
-            # Send message with entities
+            # Send message with full entity preservation
             sent_message = await self._send_message(
-                bot, pair.destination_chat_id, processed_content, 
-                media_info, reply_to_message_id, processed_entities
+                bot, pair.destination_chat_id, processed_content or "", 
+                media_info, reply_to_message_id, processed_entities or []
             )
             
             if sent_message:
@@ -109,14 +146,14 @@ class MessageProcessor:
                 
                 # Update statistics
                 self.stats['messages_copied'] += 1
-                pair.stats['messages_copied'] += 1
+                pair.stats['messages_copied'] = pair.stats.get('messages_copied', 0) + 1
                 pair.stats['last_activity'] = datetime.now().isoformat()
                 
                 if event.media:
                     self.stats['media_processed'] += 1
                 
                 if reply_to_message_id:
-                    pair.stats['replies_preserved'] += 1
+                    pair.stats['replies_preserved'] = pair.stats.get('replies_preserved', 0) + 1
                 
                 await self.db_manager.update_pair(pair)
                 
@@ -153,7 +190,7 @@ class MessageProcessor:
                     message_id=mapping.destination_message_id,
                     text=processed_content,
                     entities=processed_entities,
-                    disable_web_page_preview=True
+                    disable_web_page_preview=False  # Enable webpage previews in edits too
                 )
                 
                 # Update statistics
@@ -206,13 +243,20 @@ class MessageProcessor:
             return False
     
     async def _process_message_content(self, event, pair: MessagePair) -> tuple[Optional[str], List]:
-        """Process and filter message content with full entity support"""
+        """Process and filter message content with full entity support and formatting preservation"""
         try:
-            text = event.text or event.raw_text or ""
+            # Use raw_text to preserve original formatting without markdown conversion
+            text = event.raw_text or event.text or ""
             entities = getattr(event, 'entities', []) or []
             
-            # Apply text filters with entity preservation
-            filtered_text, processed_entities = await self.message_filter.filter_text(text, pair, entities)
+            # Skip text processing if filters are disabled to preserve original formatting
+            if pair.filters.get("preserve_original_formatting", True):
+                # Only apply essential filters while preserving entities
+                filtered_text = text
+                processed_entities = self._convert_entities_for_telegram(entities) if entities else []
+            else:
+                # Apply text filters with entity preservation
+                filtered_text, processed_entities = await self.message_filter.filter_text(text, pair, entities)
             
             # Check length limits
             min_length = pair.filters.get("min_message_length", 0)
@@ -233,7 +277,8 @@ class MessageProcessor:
             
         except Exception as e:
             logger.error(f"Error processing message content: {e}")
-            return None, []
+            # Return original text as fallback
+            return event.raw_text or event.text or "", []
     
     async def _process_media(self, event, pair: MessagePair, bot: Bot) -> Optional[Any]:
         """Process media content with comprehensive type detection and web page support"""
@@ -289,37 +334,47 @@ class MessageProcessor:
                 logger.warning("Failed to download media after all attempts")
                 return None
             
-            # Extract comprehensive media attributes
+            # Extract comprehensive media attributes with safe attribute access
             filename = None
             duration = None
             width = None
             height = None
             thumb = None
             
-            if hasattr(media, 'document') and media.document:
+            if hasattr(media, 'document') and media.document and getattr(media.document, 'attributes', None):
                 document = media.document
                 
-                # Extract filename from attributes
-                if hasattr(document, 'attributes'):
-                    for attr in document.attributes:
-                        if hasattr(attr, 'file_name') and attr.file_name:
-                            filename = attr.file_name
-                        if hasattr(attr, 'duration') and attr.duration:
-                            duration = attr.duration
-                        if hasattr(attr, 'w') and hasattr(attr, 'h'):
-                            width, height = attr.w, attr.h
+                # Safely extract filename and attributes from document
+                for attr in document.attributes:
+                    attr_type = type(attr).__name__
+                    # Extract filename from DocumentAttributeFilename
+                    if attr_type == 'DocumentAttributeFilename':
+                        filename = getattr(attr, 'file_name', None)
+                    # Extract duration from DocumentAttributeVideo or DocumentAttributeAudio
+                    elif attr_type in ['DocumentAttributeVideo', 'DocumentAttributeAudio']:
+                        duration = getattr(attr, 'duration', None)
+                    # Extract dimensions from DocumentAttributeVideo or DocumentAttributeImageSize
+                    elif attr_type in ['DocumentAttributeVideo', 'DocumentAttributeImageSize']:
+                        width = getattr(attr, 'w', None)
+                        height = getattr(attr, 'h', None)
                 
-                # Extract thumbnail
-                if hasattr(document, 'thumbs') and document.thumbs:
-                    thumb = document.thumbs[0] if document.thumbs else None
+                # Extract thumbnail safely
+                if hasattr(document, 'thumbs') and getattr(document, 'thumbs', None):
+                    thumbs = getattr(document, 'thumbs', [])
+                    thumb = thumbs[0] if thumbs else None
             
-            elif hasattr(media, 'photo') and media.photo:
+            elif hasattr(media, 'photo') and getattr(media, 'photo', None):
                 # Handle photo attributes
                 photo = media.photo
                 if hasattr(photo, 'sizes') and photo.sizes:
                     largest_size = max(photo.sizes, key=lambda s: getattr(s, 'w', 0) * getattr(s, 'h', 0))
                     width = getattr(largest_size, 'w', None)
                     height = getattr(largest_size, 'h', None)
+            
+            # Get MIME type safely
+            mime_type = None
+            if hasattr(media, 'document') and media.document:
+                mime_type = getattr(media.document, 'mime_type', None)
             
             return {
                 'type': media_type,
@@ -329,9 +384,9 @@ class MessageProcessor:
                 'width': width,
                 'height': height,
                 'thumbnail': thumb,
-                'caption': event.text or "",
+                'caption': event.raw_text or event.text or "",  # Use raw_text to preserve formatting
                 'original_media': media,
-                'mime_type': getattr(getattr(media, 'document', None), 'mime_type', None)
+                'mime_type': mime_type
             }
             
         except Exception as e:
@@ -358,11 +413,11 @@ class MessageProcessor:
 
     async def _send_message(self, bot: Bot, chat_id: int, content: str, 
                           media_info: Optional[Dict], reply_to_message_id: Optional[int] = None,
-                          entities: List = None):
+                          entities: Optional[List] = None):
         """Send message to destination chat with comprehensive media and formatting support"""
         try:
-            # Validate and convert entities for proper formatting and premium emoji support
-            converted_entities = self._validate_and_convert_entities(content, entities) if entities else None
+            # Validate and convert entities for proper formatting and premium emoji support  
+            converted_entities = self._validate_and_convert_entities(content, entities or [])
             
             # Handle webpage preview messages
             if media_info and media_info.get('type') == 'webpage':
@@ -375,6 +430,16 @@ class MessageProcessor:
                         disable_web_page_preview=False,  # Enable webpage previews
                         reply_to_message_id=reply_to_message_id
                     )
+                else:
+                    # If no content but has webpage info, send the URL to trigger preview
+                    webpage_url = media_info.get('url', '')
+                    if webpage_url:
+                        return await bot.send_message(
+                            chat_id=chat_id,
+                            text=webpage_url,
+                            disable_web_page_preview=False,
+                            reply_to_message_id=reply_to_message_id
+                        )
             
             if media_info and media_info.get('type') != 'webpage':
                 # Send media message with enhanced content handling
@@ -593,11 +658,32 @@ class MessageProcessor:
             if isinstance(media, MessageMediaPhoto):
                 return "photo"
             elif isinstance(media, MessageMediaDocument):
-                document = media.document
+                document = getattr(media, 'document', None)
+                if not document:
+                    return "document"
                 
-                # Check MIME type first
-                if hasattr(document, 'mime_type') and document.mime_type:
-                    mime_type = document.mime_type.lower()
+                # Safely check document attributes first for specific type detection
+                if getattr(document, 'attributes', None):
+                    for attr in document.attributes:
+                        attr_type = type(attr).__name__
+                        
+                        if attr_type == 'DocumentAttributeSticker':
+                            return "sticker"
+                        elif attr_type == 'DocumentAttributeAnimated':
+                            return "animation"
+                        elif attr_type == 'DocumentAttributeVideo':
+                            if getattr(attr, 'round_message', False):
+                                return "video_note"
+                            return "video"
+                        elif attr_type == 'DocumentAttributeAudio':
+                            if getattr(attr, 'voice', False):
+                                return "voice"
+                            return "audio"
+                
+                # Check MIME type as fallback
+                mime_type = getattr(document, 'mime_type', None)
+                if mime_type:
+                    mime_type = mime_type.lower()
                     
                     # Image types
                     if mime_type.startswith('image/'):
@@ -611,33 +697,13 @@ class MessageProcessor:
                     
                     # Audio types
                     elif mime_type.startswith('audio/'):
-                        # Check if it's a voice message
-                        if hasattr(document, 'attributes'):
-                            for attr in document.attributes:
-                                if 'DocumentAttributeAudio' in str(type(attr)):
-                                    if getattr(attr, 'voice', False):
-                                        return "voice"
                         return "audio"
                 
-                # Check document attributes for more specific type detection
-                if hasattr(document, 'attributes'):
-                    for attr in document.attributes:
-                        attr_type = str(type(attr))
-                        
-                        if 'DocumentAttributeAnimated' in attr_type:
-                            return "animation"
-                        elif 'DocumentAttributeVideo' in attr_type:
-                            if getattr(attr, 'round_message', False):
-                                return "video_note"
-                            return "video"
-                        elif 'DocumentAttributeAudio' in attr_type:
-                            if getattr(attr, 'voice', False):
-                                return "voice"
-                            return "audio"
-                        elif 'DocumentAttributeSticker' in attr_type:
-                            return "sticker"
-                
                 return "document"
+            
+            # Handle web page media
+            elif hasattr(media, '__class__') and 'MessageMediaWebPage' in str(media.__class__):
+                return "webpage"
             
             return "unknown"
             
