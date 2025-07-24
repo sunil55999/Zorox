@@ -26,6 +26,7 @@ class Config:
         # Bot tokens
         self.BOT_TOKENS = self._get_bot_tokens()
         self.PRIMARY_BOT_TOKEN = self.BOT_TOKENS[0] if self.BOT_TOKENS else None
+        self.ADMIN_BOT_TOKEN = os.getenv('ADMIN_BOT_TOKEN')
         
         # Redis configuration
         self.REDIS_URL = os.getenv('REDIS_URL', "redis://localhost:6379")
@@ -104,6 +105,8 @@ class Config:
             errors.append("TELEGRAM_PHONE is required")
         if not self.BOT_TOKENS:
             errors.append("At least one bot token is required")
+        if not self.ADMIN_BOT_TOKEN:
+            errors.append("ADMIN_BOT_TOKEN is required for system management")
         
         # Validate numeric ranges
         if self.MAX_WORKERS < 1 or self.MAX_WORKERS > 50:
