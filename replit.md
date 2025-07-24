@@ -165,19 +165,29 @@ The system follows a modular, async-first architecture with clear separation of 
 
 ## Recent Changes
 
-### 2025-07-24: Fixed Critical Issues in Telegram Forwarder Bot - COMPLETED ✅
+### 2025-07-24: Complete Bot Token Management & URL Forwarding System - COMPLETED ✅
 - ✅ **URL Forwarding Fixed**: Enhanced URL detection patterns achieving 100% test success rate
   - Messages with URLs forwarded as text with `disable_web_page_preview=False`
   - Support for both regular URLs (https://example.com) and markdown links ([text](url))
   - Proper handling of formatting preservation and entity conversion
   - Enhanced regex patterns excluding email addresses to prevent false positives
   - **CRITICAL FIX**: Resolved media type filter blocking URL messages with webpage/unknown media
+- ✅ **Bot Token Management System**: Complete database-driven bot token management
+  - `/addtoken <name> <token>` - Add and validate new bot tokens
+  - `/listtokens [--all]` - List all bot tokens with usage statistics
+  - `/deletetoken <token_id>` - Remove bot tokens safely
+  - `/toggletoken <token_id>` - Enable/disable bot tokens
+- ✅ **Enhanced Pair Creation**: Updated `/addpair` command with bot token selection
+  - Usage: `/addpair <source_chat_id> <dest_chat_id> <name> [bot_token_id]`
+  - Automatic token validation and assignment
+  - Backward compatibility with existing pairs
+- ✅ **Database Schema Updates**: Added bot_tokens table with full relational support
+- ✅ **Test File Cleanup**: Removed all test files to clean up project structure
 - ✅ **Media Type Filter Fix**: Updated allowed_media_types to include "webpage" and "unknown" for URL messages
 - ✅ **Enhanced Debugging**: Added comprehensive logging to identify filtering issues  
 - ✅ **pHash Image Blocking**: Improved error handling and library availability checks
 - ✅ **Global Word Blocking**: Integrated with config system and environment variables  
 - ✅ **Bot API Usage**: All messages sent via Bot API with proper formatting preservation
-- ✅ **Error Logging**: Comprehensive error handling for URL and formatting issues
 
 ### 2025-07-24: Critical Functionality Fixes - COMPLETED ✅
 - **Image Blocking Commands**: Fixed `/blockimage` command by implementing Bot API download instead of Telethon client, with direct PIL/imagehash computation in bot_manager.py

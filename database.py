@@ -116,7 +116,21 @@ class DatabaseManager:
             await conn.execute("PRAGMA foreign_keys = ON")
             await conn.execute("PRAGMA journal_mode = WAL")
             
-            # Pairs table
+            # Bot tokens table
+            await conn.execute('''
+                CREATE TABLE IF NOT EXISTS bot_tokens (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL UNIQUE,
+                    token TEXT NOT NULL,
+                    username TEXT,
+                    is_active BOOLEAN DEFAULT 1,
+                    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                    last_used TEXT,
+                    usage_count INTEGER DEFAULT 0
+                )
+            ''')
+
+            # Pairs table (updated with bot_token_id)
             await conn.execute('''
                 CREATE TABLE IF NOT EXISTS pairs (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -125,10 +139,12 @@ class DatabaseManager:
                     name TEXT NOT NULL,
                     status TEXT DEFAULT 'active',
                     assigned_bot_index INTEGER DEFAULT 0,
+                    bot_token_id INTEGER,
                     filters TEXT DEFAULT '{}',
                     stats TEXT DEFAULT '{}',
                     created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-                    UNIQUE(source_chat_id, destination_chat_id)
+                    UNIQUE(source_chat_id, destination_chat_id),
+                    FOREIGN KEY (bot_token_id) REFERENCES bot_tokens (id)
                 )
             ''')
 
@@ -253,15 +269,15 @@ class DatabaseManager:
             await conn.close()
     
     async def create_pair(self, source_chat_id: int, destination_chat_id: int,
-                         name: str, bot_index: int = 0) -> int:
+                         name: str, bot_index: int = 0, bot_token_id: int = None) -> int:
         """Create new message pair"""
         try:
             async with self.get_connection() as conn:
                 cursor = await conn.execute('''
-                    INSERT INTO pairs (source_chat_id, destination_chat_id, name, assigned_bot_index, filters, stats)
-                    VALUES (?, ?, ?, ?, ?, ?)
+                    INSERT INTO pairs (source_chat_id, destination_chat_id, name, assigned_bot_index, bot_token_id, filters, stats)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
                 ''', (
-                    source_chat_id, destination_chat_id, name, bot_index,
+                    source_chat_id, destination_chat_id, name, bot_index, bot_token_id,
                     json.dumps(MessagePair(0, 0, 0, "").filters),
                     json.dumps(MessagePair(0, 0, 0, "").stats)
                 ))
@@ -572,6 +588,117 @@ class DatabaseManager:
         except Exception as e:
             logger.error(f"Failed to count old errors: {e}")
             return 0
+
+    # Bot Token Management Methods
+    async def save_bot_token(self, name: str, token: str, username: str = None) -> int:
+        """Save a bot token to database"""
+        try:
+            async with self.get_connection() as conn:
+                cursor = await conn.execute('''
+                    INSERT OR REPLACE INTO bot_tokens (name, token, username, is_active, created_at)
+                    VALUES (?, ?, ?, 1, CURRENT_TIMESTAMP)
+                ''', (name, token, username))
+                token_id = cursor.lastrowid
+                await conn.commit()
+                logger.info(f"Saved bot token: {name} ({username})")
+                return token_id
+        except Exception as e:
+            logger.error(f"Failed to save bot token: {e}")
+            raise
+
+    async def get_bot_tokens(self, active_only: bool = True) -> List[Dict[str, Any]]:
+        """Get all bot tokens"""
+        try:
+            async with self.get_connection() as conn:
+                query = "SELECT * FROM bot_tokens"
+                if active_only:
+                    query += " WHERE is_active = 1"
+                query += " ORDER BY created_at DESC"
+                
+                cursor = await conn.execute(query)
+                rows = await cursor.fetchall()
+                
+                tokens = []
+                for row in rows:
+                    tokens.append({
+                        'id': row[0],
+                        'name': row[1],
+                        'token': row[2],
+                        'username': row[3],
+                        'is_active': bool(row[4]),
+                        'created_at': row[5],
+                        'last_used': row[6],
+                        'usage_count': row[7]
+                    })
+                return tokens
+        except Exception as e:
+            logger.error(f"Failed to get bot tokens: {e}")
+            return []
+
+    async def get_bot_token_by_id(self, token_id: int) -> Optional[Dict[str, Any]]:
+        """Get specific bot token by ID"""
+        try:
+            async with self.get_connection() as conn:
+                cursor = await conn.execute(
+                    "SELECT * FROM bot_tokens WHERE id = ?", (token_id,)
+                )
+                row = await cursor.fetchone()
+                if row:
+                    return {
+                        'id': row[0],
+                        'name': row[1],
+                        'token': row[2],
+                        'username': row[3],
+                        'is_active': bool(row[4]),
+                        'created_at': row[5],
+                        'last_used': row[6],
+                        'usage_count': row[7]
+                    }
+                return None
+        except Exception as e:
+            logger.error(f"Failed to get bot token: {e}")
+            return None
+
+    async def update_bot_token_usage(self, token_id: int):
+        """Update bot token usage statistics"""
+        try:
+            async with self.get_connection() as conn:
+                await conn.execute('''
+                    UPDATE bot_tokens 
+                    SET usage_count = usage_count + 1, last_used = CURRENT_TIMESTAMP
+                    WHERE id = ?
+                ''', (token_id,))
+                await conn.commit()
+        except Exception as e:
+            logger.error(f"Failed to update bot token usage: {e}")
+
+    async def delete_bot_token(self, token_id: int) -> bool:
+        """Delete a bot token"""
+        try:
+            async with self.get_connection() as conn:
+                cursor = await conn.execute(
+                    "DELETE FROM bot_tokens WHERE id = ?", (token_id,)
+                )
+                await conn.commit()
+                return cursor.rowcount > 0
+        except Exception as e:
+            logger.error(f"Failed to delete bot token: {e}")
+            return False
+
+    async def toggle_bot_token_status(self, token_id: int) -> bool:
+        """Toggle bot token active status"""
+        try:
+            async with self.get_connection() as conn:
+                await conn.execute('''
+                    UPDATE bot_tokens 
+                    SET is_active = NOT is_active
+                    WHERE id = ?
+                ''', (token_id,))
+                await conn.commit()
+                return True
+        except Exception as e:
+            logger.error(f"Failed to toggle bot token status: {e}")
+            return False
 
     async def close(self):
         """Close database connections"""

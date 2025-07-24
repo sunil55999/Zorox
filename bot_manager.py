@@ -265,6 +265,12 @@ class BotManager:
         app.add_handler(CommandHandler("footerregex", self._cmd_set_footer_regex))
         app.add_handler(CommandHandler("testfilter", self._cmd_test_filter))
         
+        # Bot token management commands
+        app.add_handler(CommandHandler("addtoken", self._cmd_add_token))
+        app.add_handler(CommandHandler("listtokens", self._cmd_list_tokens))
+        app.add_handler(CommandHandler("deletetoken", self._cmd_delete_token))
+        app.add_handler(CommandHandler("toggletoken", self._cmd_toggle_token))
+        
         app.add_handler(CallbackQueryHandler(self._handle_callback))
     
     async def _load_pairs(self):
@@ -788,8 +794,15 @@ class BotManager:
 /backup - Create database backup
 /cleanup [--force] - Clean old data (preview or execute)
 
+**Bot Token Management:**
+/addtoken <name> <token> - Add new bot token
+/listtokens [--all] - List bot tokens
+/deletetoken <token_id> - Delete bot token
+/toggletoken <token_id> - Enable/disable bot token
+
 **Features:**
 ✅ Multi-bot support with load balancing
+✅ Bot token management via commands
 ✅ Advanced message filtering with word/image blocking
 ✅ Real-time synchronization with premium emoji support
 ✅ Image duplicate detection and processing
@@ -927,27 +940,51 @@ class BotManager:
             await update.message.reply_text(f"Error resuming system: {e}")
     
     async def _cmd_add_pair(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Add pair command handler"""
+        """Add pair command handler with optional bot token selection"""
         if not update.effective_user or not self._is_admin(update.effective_user.id):
             return
         
         try:
             if len(context.args) < 3:
                 await update.message.reply_text(
-                    "Usage: /addpair <source_chat_id> <dest_chat_id> <name>"
+                    "Usage: /addpair <source_chat_id> <dest_chat_id> <name> [bot_token_id]\n"
+                    "Use /listtokens to see available bot tokens"
                 )
                 return
             
             source_id = int(context.args[0])
             dest_id = int(context.args[1])
-            name = " ".join(context.args[2:])
+            bot_token_id = None
             
-            pair_id = await self.db_manager.create_pair(source_id, dest_id, name)
+            # Check if bot_token_id is provided
+            if len(context.args) >= 4:
+                try:
+                    potential_token_id = int(context.args[3])
+                    # Verify token exists and is active
+                    token = await self.db_manager.get_bot_token_by_id(potential_token_id)
+                    if token and token['is_active']:
+                        bot_token_id = potential_token_id
+                        name = " ".join(context.args[2:3])  # Only take the name, not the token_id
+                    else:
+                        await update.message.reply_text(f"❌ Bot token {potential_token_id} not found or inactive. Use /listtokens to see available tokens.")
+                        return
+                except ValueError:
+                    # Last argument is not a number, treat as part of name
+                    name = " ".join(context.args[2:])
+            else:
+                name = " ".join(context.args[2:])
+            
+            pair_id = await self.db_manager.create_pair(source_id, dest_id, name, bot_token_id=bot_token_id)
             await self._load_pairs()  # Reload pairs
+            
+            token_info = ""
+            if bot_token_id:
+                token = await self.db_manager.get_bot_token_by_id(bot_token_id)
+                token_info = f"\n🤖 Using bot: {token['name']} (@{token['username']})"
             
             await update.message.reply_text(
                 f"✅ Created pair {pair_id}: {name}\n"
-                f"{source_id} → {dest_id}"
+                f"{source_id} → {dest_id}{token_info}"
             )
             
         except ValueError as e:
@@ -1940,3 +1977,143 @@ Use `/cleanup --force` to proceed with cleanup.
     def get_queue_size(self) -> int:
         """Get current queue size"""
         return self.message_queue.qsize()
+
+    # Bot Token Management Commands
+    async def _cmd_add_token(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Add a new bot token"""
+        if not self._is_admin(update.effective_user.id):
+            return
+        
+        try:
+            if len(context.args) < 2:
+                await update.message.reply_text(
+                    "Usage: /addtoken <name> <token>\n"
+                    "Example: /addtoken MyBot 1234567890:ABCdefGHIjklMNOPqrs"
+                )
+                return
+            
+            name = context.args[0]
+            token = context.args[1]
+            
+            # Validate token format
+            if not token.count(':') == 1 or len(token.split(':')[0]) < 8:
+                await update.message.reply_text("❌ Invalid token format. Token should be like: 1234567890:ABCdefGHIjklMNOPqrs")
+                return
+            
+            # Test the token by getting bot info
+            try:
+                test_bot = Bot(token)
+                bot_info = await test_bot.get_me()
+                username = bot_info.username
+            except Exception as e:
+                await update.message.reply_text(f"❌ Invalid token or bot unreachable: {e}")
+                return
+            
+            # Save token to database
+            token_id = await self.db_manager.save_bot_token(name, token, username)
+            
+            await update.message.reply_text(
+                f"✅ Bot token added successfully!\n"
+                f"**Name:** {name}\n"
+                f"**Username:** @{username}\n"
+                f"**ID:** {token_id}",
+                parse_mode='Markdown'
+            )
+            
+        except Exception as e:
+            await update.message.reply_text(f"❌ Error adding token: {e}")
+
+    async def _cmd_list_tokens(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """List all bot tokens"""
+        if not self._is_admin(update.effective_user.id):
+            return
+        
+        try:
+            show_all = len(context.args) > 0 and context.args[0] == "--all"
+            tokens = await self.db_manager.get_bot_tokens(active_only=not show_all)
+            
+            if not tokens:
+                await update.message.reply_text("No bot tokens found.")
+                return
+            
+            tokens_text = "🤖 **Bot Tokens:**\n\n"
+            for token in tokens:
+                status = "✅ Active" if token['is_active'] else "❌ Inactive"
+                usage = token['usage_count'] or 0
+                last_used = token['last_used'] or "Never"
+                
+                tokens_text += f"**{token['name']}** (ID: {token['id']})\n"
+                tokens_text += f"   @{token['username']} - {status}\n"
+                tokens_text += f"   Used: {usage} times, Last: {last_used}\n\n"
+            
+            await update.message.reply_text(tokens_text, parse_mode='Markdown')
+            
+        except Exception as e:
+            await update.message.reply_text(f"❌ Error listing tokens: {e}")
+
+    async def _cmd_delete_token(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Delete a bot token"""
+        if not self._is_admin(update.effective_user.id):
+            return
+        
+        try:
+            if len(context.args) < 1:
+                await update.message.reply_text("Usage: /deletetoken <token_id>")
+                return
+            
+            token_id = int(context.args[0])
+            
+            # Check if token exists
+            token = await self.db_manager.get_bot_token_by_id(token_id)
+            if not token:
+                await update.message.reply_text("❌ Token not found.")
+                return
+            
+            # Delete token
+            success = await self.db_manager.delete_bot_token(token_id)
+            
+            if success:
+                await update.message.reply_text(
+                    f"✅ Deleted token: {token['name']} (@{token['username']})"
+                )
+            else:
+                await update.message.reply_text("❌ Failed to delete token.")
+                
+        except ValueError:
+            await update.message.reply_text("❌ Invalid token ID. Please use a number.")
+        except Exception as e:
+            await update.message.reply_text(f"❌ Error deleting token: {e}")
+
+    async def _cmd_toggle_token(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Toggle bot token active status"""
+        if not self._is_admin(update.effective_user.id):
+            return
+        
+        try:
+            if len(context.args) < 1:
+                await update.message.reply_text("Usage: /toggletoken <token_id>")
+                return
+            
+            token_id = int(context.args[0])
+            
+            # Check if token exists
+            token = await self.db_manager.get_bot_token_by_id(token_id)
+            if not token:
+                await update.message.reply_text("❌ Token not found.")
+                return
+            
+            # Toggle status
+            success = await self.db_manager.toggle_bot_token_status(token_id)
+            
+            if success:
+                new_status = "Active" if not token['is_active'] else "Inactive"
+                await update.message.reply_text(
+                    f"✅ Token {token['name']} is now {new_status}"
+                )
+            else:
+                await update.message.reply_text("❌ Failed to toggle token status.")
+                
+        except ValueError:
+            await update.message.reply_text("❌ Invalid token ID. Please use a number.")
+        except Exception as e:
+            await update.message.reply_text(f"❌ Error toggling token: {e}")
