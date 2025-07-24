@@ -267,12 +267,19 @@ class MessageProcessor:
         try:
             media = event.media
             
-            # Handle web page previews - don't process as separate media
+            # Handle web page previews
             if hasattr(media, '__class__') and 'MessageMediaWebPage' in str(media.__class__):
-                # Extract webpage info but don't return it as media
-                # Web previews should be handled by the text message with disable_web_page_preview=False
-                logger.debug("Found webpage media, letting text message handle preview")
-                return None
+                # Extract webpage info
+                webpage = getattr(media, 'webpage', None)
+                if webpage:
+                    return {
+                        'type': 'webpage',
+                        'url': getattr(webpage, 'url', ''),
+                        'title': getattr(webpage, 'title', ''),
+                        'description': getattr(webpage, 'description', ''),
+                        'photo': getattr(webpage, 'photo', None),
+                        'original_media': media
+                    }
             
             # Check if media type is allowed
             allowed_types = pair.filters.get("allowed_media_types", [
@@ -468,10 +475,7 @@ class MessageProcessor:
             # Validate and convert entities for proper formatting and premium emoji support  
             converted_entities = self._validate_and_convert_entities(content, entities or [])
             
-            # Check if content contains URLs for webpage preview
-            has_urls = self._contains_urls(content) if content else False
-            
-            # Handle webpage preview messages or messages with URLs
+            # Handle webpage preview messages
             if media_info and media_info.get('type') == 'webpage':
                 # For webpage previews, send as text with web preview enabled
                 if content:
@@ -614,7 +618,7 @@ class MessageProcessor:
                         chat_id=chat_id,
                         text=content,
                         entities=converted_entities,
-                        disable_web_page_preview=False,  # Enable webpage previews for URLs
+                        disable_web_page_preview=False,  # Enable webpage previews
                         reply_to_message_id=reply_to_message_id
                     )
             
@@ -839,24 +843,6 @@ class MessageProcessor:
         
         return text.strip()
     
-    def _contains_urls(self, text: str) -> bool:
-        """Check if text contains URLs that should show previews"""
-        if not text:
-            return False
-        
-        import re
-        url_patterns = [
-            r'https?://[^\s]+',  # HTTP/HTTPS URLs
-            r'www\.[^\s]+',      # www URLs
-            r't\.me/[^\s]+',     # Telegram URLs
-        ]
-        
-        for pattern in url_patterns:
-            if re.search(pattern, text, re.IGNORECASE):
-                return True
-        
-        return False
-    
     def _convert_entities_for_telegram(self, entities: List) -> List:
         """Convert Telethon entities to python-telegram-bot format with comprehensive validation"""
         try:
@@ -884,14 +870,7 @@ class MessageProcessor:
                         continue
                     
                     # Map Telethon entity types to Telegram entity types with comprehensive coverage
-                    # Handle URL entities first to ensure they're preserved
-                    if 'MessageEntityUrl' in entity_type or 'Url' in entity_type:
-                        converted_entities.append(MessageEntity(MessageEntity.URL, offset, length))
-                    elif 'MessageEntityTextUrl' in entity_type or 'TextUrl' in entity_type:
-                        url = getattr(entity, 'url', '')
-                        if url:
-                            converted_entities.append(MessageEntity(MessageEntity.TEXT_LINK, offset, length, url=url))
-                    elif 'MessageEntityBold' in entity_type or 'Bold' in entity_type:
+                    if 'MessageEntityBold' in entity_type or 'Bold' in entity_type:
                         converted_entities.append(MessageEntity(MessageEntity.BOLD, offset, length))
                     elif 'MessageEntityItalic' in entity_type or 'Italic' in entity_type:
                         converted_entities.append(MessageEntity(MessageEntity.ITALIC, offset, length))
@@ -906,6 +885,12 @@ class MessageProcessor:
                         converted_entities.append(MessageEntity(MessageEntity.UNDERLINE, offset, length))
                     elif 'MessageEntitySpoiler' in entity_type or 'Spoiler' in entity_type:
                         converted_entities.append(MessageEntity(MessageEntity.SPOILER, offset, length))
+                    elif 'MessageEntityUrl' in entity_type or 'Url' in entity_type:
+                        converted_entities.append(MessageEntity(MessageEntity.URL, offset, length))
+                    elif 'MessageEntityTextUrl' in entity_type or 'TextUrl' in entity_type:
+                        url = getattr(entity, 'url', '')
+                        if url:
+                            converted_entities.append(MessageEntity(MessageEntity.TEXT_LINK, offset, length, url=url))
                     elif 'MessageEntityMention' in entity_type or 'Mention' in entity_type:
                         converted_entities.append(MessageEntity(MessageEntity.MENTION, offset, length))
                     elif 'MessageEntityMentionName' in entity_type or 'MentionName' in entity_type:
@@ -958,14 +943,6 @@ class MessageProcessor:
         ])
         
         text_lower = text.lower()
-        
-        # Don't block messages that only contain URLs
-        import re
-        url_only_pattern = r'^\s*(https?://[^\s]+|www\.[^\s]+|t\.me/[^\s]+)\s*$'
-        if re.match(url_only_pattern, text_lower):
-            logger.debug("Message contains only URL, not blocking")
-            return False
-        
         for word in BLOCKED_WORDS:
             if word.lower() in text_lower:
                 logger.debug(f"Text blocked for word: {word}")
