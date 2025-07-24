@@ -61,8 +61,8 @@ class MessageProcessor:
                 await self.db_manager.update_pair(pair)
                 return True  # Successfully filtered (not an error)
             
-            # Process message content
-            processed_content = await self._process_message_content(event, pair)
+            # Process message content with entities
+            processed_content, processed_entities = await self._process_message_content(event, pair)
             if not processed_content:
                 logger.warning("Failed to process message content")
                 return False
@@ -82,10 +82,10 @@ class MessageProcessor:
             if event.is_reply and pair.filters.get("preserve_replies", True):
                 reply_to_message_id = await self._find_reply_target(event, pair)
             
-            # Send message
+            # Send message with entities
             sent_message = await self._send_message(
                 bot, pair.destination_chat_id, processed_content, 
-                media_info, reply_to_message_id
+                media_info, reply_to_message_id, processed_entities
             )
             
             if sent_message:
@@ -141,8 +141,8 @@ class MessageProcessor:
                 logger.debug(f"No mapping found for edited message {event.id}")
                 return True  # Not an error if we don't have the original
             
-            # Process edited content
-            processed_content = await self._process_message_content(event, pair)
+            # Process edited content with entities
+            processed_content, processed_entities = await self._process_message_content(event, pair)
             if not processed_content:
                 return False
             
@@ -151,8 +151,8 @@ class MessageProcessor:
                 await bot.edit_message_text(
                     chat_id=pair.destination_chat_id,
                     message_id=mapping.destination_message_id,
-                    text=processed_content.text,
-                    parse_mode=processed_content.parse_mode,
+                    text=processed_content,
+                    entities=processed_entities,
                     disable_web_page_preview=True
                 )
                 
@@ -205,56 +205,35 @@ class MessageProcessor:
             logger.error(f"Error processing message deletion: {e}")
             return False
     
-    async def _process_message_content(self, event, pair: MessagePair) -> Optional['ProcessedContent']:
-        """Process and filter message content"""
+    async def _process_message_content(self, event, pair: MessagePair) -> tuple[Optional[str], List]:
+        """Process and filter message content with full entity support"""
         try:
             text = event.text or event.raw_text or ""
+            entities = getattr(event, 'entities', []) or []
             
-            # Apply text filters
-            filtered_text = await self.message_filter.filter_text(text, pair)
-            
-            # Apply content transformations
-            if pair.filters.get("remove_mentions", False):
-                filtered_text = self._remove_mentions(
-                    filtered_text, 
-                    pair.filters.get("mention_placeholder", "[User]")
-                )
-                if filtered_text != text:
-                    pair.stats['mentions_removed'] += 1
-            
-            # Remove headers if configured
-            if pair.filters.get("remove_headers", False):
-                original_text = filtered_text
-                filtered_text = self._remove_headers(filtered_text, pair.filters.get("header_patterns", []))
-                if filtered_text != original_text:
-                    pair.stats['headers_removed'] += 1
-            
-            # Remove footers if configured
-            if pair.filters.get("remove_footers", False):
-                original_text = filtered_text
-                filtered_text = self._remove_footers(filtered_text, pair.filters.get("footer_patterns", []))
-                if filtered_text != original_text:
-                    pair.stats['footers_removed'] += 1
+            # Apply text filters with entity preservation
+            filtered_text, processed_entities = await self.message_filter.filter_text(text, pair, entities)
             
             # Check length limits
             min_length = pair.filters.get("min_message_length", 0)
             max_length = pair.filters.get("max_message_length", 0)
             
             if min_length > 0 and len(filtered_text) < min_length:
-                return None
+                return None, []
             
             if max_length > 0 and len(filtered_text) > max_length:
+                # Truncate text and adjust entities
                 filtered_text = filtered_text[:max_length] + "..."
+                processed_entities = [
+                    e for e in processed_entities 
+                    if getattr(e, 'offset', 0) + getattr(e, 'length', 0) <= max_length
+                ]
             
-            return ProcessedContent(
-                text=filtered_text,
-                parse_mode=None,
-                entities=event.entities if hasattr(event, 'entities') else None
-            )
+            return filtered_text, processed_entities
             
         except Exception as e:
             logger.error(f"Error processing message content: {e}")
-            return None
+            return None, []
     
     async def _process_media(self, event, pair: MessagePair, bot: Bot) -> Optional[Any]:
         """Process media content"""
@@ -273,9 +252,10 @@ class MessageProcessor:
             
             # Special handling for images
             if isinstance(media, MessageMediaPhoto):
-                # Check for duplicate images
+                # Check for duplicate images with phash
                 if await self.image_handler.is_image_blocked(event, pair):
                     logger.debug("Image blocked as duplicate")
+                    pair.stats['images_blocked'] = pair.stats.get('images_blocked', 0) + 1
                     return False
             
             # Download media
@@ -311,8 +291,9 @@ class MessageProcessor:
             logger.error(f"Error downloading media: {e}")
             return None
     
-    async def _send_message(self, bot: Bot, chat_id: int, content: 'ProcessedContent', 
-                          media_info: Optional[Dict], reply_to_message_id: Optional[int] = None):
+    async def _send_message(self, bot: Bot, chat_id: int, content: str, 
+                          media_info: Optional[Dict], reply_to_message_id: Optional[int] = None,
+                          entities: List = None):
         """Send message to destination chat"""
         try:
             if media_info:
@@ -321,14 +302,16 @@ class MessageProcessor:
                     return await bot.send_photo(
                         chat_id=chat_id,
                         photo=media_info['data'],
-                        caption=content.text[:1024] if content.text else None,
+                        caption=content[:1024] if content else None,
+                        caption_entities=self._convert_entities_for_telegram(entities) if entities else None,
                         reply_to_message_id=reply_to_message_id
                     )
                 elif media_info['type'] == 'video':
                     return await bot.send_video(
                         chat_id=chat_id,
                         video=media_info['data'],
-                        caption=content.text[:1024] if content.text else None,
+                        caption=content[:1024] if content else None,
+                        caption_entities=self._convert_entities_for_telegram(entities) if entities else None,
                         reply_to_message_id=reply_to_message_id
                     )
                 elif media_info['type'] == 'document':
@@ -336,30 +319,33 @@ class MessageProcessor:
                         chat_id=chat_id,
                         document=media_info['data'],
                         filename=media_info.get('filename'),
-                        caption=content.text[:1024] if content.text else None,
+                        caption=content[:1024] if content else None,
+                        caption_entities=self._convert_entities_for_telegram(entities) if entities else None,
                         reply_to_message_id=reply_to_message_id
                     )
                 elif media_info['type'] == 'audio':
                     return await bot.send_audio(
                         chat_id=chat_id,
                         audio=media_info['data'],
-                        caption=content.text[:1024] if content.text else None,
+                        caption=content[:1024] if content else None,
+                        caption_entities=self._convert_entities_for_telegram(entities) if entities else None,
                         reply_to_message_id=reply_to_message_id
                     )
                 elif media_info['type'] == 'voice':
                     return await bot.send_voice(
                         chat_id=chat_id,
                         voice=media_info['data'],
-                        caption=content.text[:1024] if content.text else None,
+                        caption=content[:1024] if content else None,
+                        caption_entities=self._convert_entities_for_telegram(entities) if entities else None,
                         reply_to_message_id=reply_to_message_id
                     )
             else:
                 # Send text message
-                if content.text:
+                if content:
                     return await bot.send_message(
                         chat_id=chat_id,
-                        text=content.text,
-                        parse_mode=content.parse_mode,
+                        text=content,
+                        entities=self._convert_entities_for_telegram(entities) if entities else None,
                         disable_web_page_preview=True,
                         reply_to_message_id=reply_to_message_id
                     )
@@ -403,8 +389,6 @@ class MessageProcessor:
         """Determine media type"""
         if isinstance(media, MessageMediaPhoto):
             return "photo"
-        elif isinstance(media, MessageMediaVideo):
-            return "video"
         elif isinstance(media, MessageMediaDocument):
             if hasattr(media.document, 'mime_type'):
                 mime_type = media.document.mime_type
@@ -414,13 +398,11 @@ class MessageProcessor:
                     return "video"
                 elif mime_type.startswith('audio/'):
                     return "audio"
+                elif 'voice' in mime_type.lower():
+                    return "voice"
+                elif 'video_note' in mime_type.lower():
+                    return "video_note"
             return "document"
-        elif isinstance(media, MessageMediaAudio):
-            return "audio"
-        elif isinstance(media, MessageMediaVoice):
-            return "voice"
-        elif isinstance(media, MessageMediaVideoNote):
-            return "video_note"
         return "unknown"
     
     def _remove_mentions(self, text: str, placeholder: str) -> str:
@@ -464,14 +446,53 @@ class MessageProcessor:
         
         return text.strip()
     
+    def _convert_entities_for_telegram(self, entities: List) -> List:
+        """Convert Telethon entities to python-telegram-bot format"""
+        try:
+            from telegram import MessageEntity
+            
+            if not entities:
+                return []
+            
+            converted_entities = []
+            
+            for entity in entities:
+                entity_type = getattr(entity, '__class__', {}).get('__name__', str(type(entity)))
+                offset = getattr(entity, 'offset', 0)
+                length = getattr(entity, 'length', 0)
+                
+                # Map Telethon entity types to Telegram entity types
+                if 'Bold' in entity_type:
+                    converted_entities.append(MessageEntity(MessageEntity.BOLD, offset, length))
+                elif 'Italic' in entity_type:
+                    converted_entities.append(MessageEntity(MessageEntity.ITALIC, offset, length))
+                elif 'Code' in entity_type:
+                    converted_entities.append(MessageEntity(MessageEntity.CODE, offset, length))
+                elif 'Pre' in entity_type:
+                    converted_entities.append(MessageEntity(MessageEntity.PRE, offset, length))
+                elif 'Strike' in entity_type:
+                    converted_entities.append(MessageEntity(MessageEntity.STRIKETHROUGH, offset, length))
+                elif 'Underline' in entity_type:
+                    converted_entities.append(MessageEntity(MessageEntity.UNDERLINE, offset, length))
+                elif 'Spoiler' in entity_type:
+                    converted_entities.append(MessageEntity(MessageEntity.SPOILER, offset, length))
+                elif 'Url' in entity_type:
+                    converted_entities.append(MessageEntity(MessageEntity.URL, offset, length))
+                elif 'TextUrl' in entity_type:
+                    url = getattr(entity, 'url', '')
+                    converted_entities.append(MessageEntity(MessageEntity.TEXT_LINK, offset, length, url=url))
+                elif 'Mention' in entity_type:
+                    converted_entities.append(MessageEntity(MessageEntity.MENTION, offset, length))
+                elif 'CustomEmoji' in entity_type:
+                    custom_emoji_id = getattr(entity, 'document_id', '')
+                    converted_entities.append(MessageEntity(MessageEntity.CUSTOM_EMOJI, offset, length, custom_emoji_id=str(custom_emoji_id)))
+            
+            return converted_entities
+            
+        except Exception as e:
+            logger.error(f"Error converting entities: {e}")
+            return []
+    
     def get_stats(self) -> Dict[str, int]:
         """Get processing statistics"""
         return self.stats.copy()
-
-class ProcessedContent:
-    """Container for processed message content"""
-    
-    def __init__(self, text: str, parse_mode: Optional[str] = None, entities: Optional[List] = None):
-        self.text = text
-        self.parse_mode = parse_mode
-        self.entities = entities

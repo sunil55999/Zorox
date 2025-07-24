@@ -230,6 +230,18 @@ class BotManager:
         app.add_handler(CommandHandler("backup", self._cmd_backup))
         app.add_handler(CommandHandler("cleanup", self._cmd_cleanup))
         
+        # Advanced filtering commands
+        app.add_handler(CommandHandler("blockword", self._cmd_block_word))
+        app.add_handler(CommandHandler("unblockword", self._cmd_unblock_word))
+        app.add_handler(CommandHandler("listblocked", self._cmd_list_blocked_words))
+        app.add_handler(CommandHandler("blockimage", self._cmd_block_image))
+        app.add_handler(CommandHandler("unblockimage", self._cmd_unblock_image))
+        app.add_handler(CommandHandler("listblockedimages", self._cmd_list_blocked_images))
+        app.add_handler(CommandHandler("mentions", self._cmd_set_mention_removal))
+        app.add_handler(CommandHandler("headerregex", self._cmd_set_header_regex))
+        app.add_handler(CommandHandler("footerregex", self._cmd_set_footer_regex))
+        app.add_handler(CommandHandler("testfilter", self._cmd_test_filter))
+        
         app.add_handler(CallbackQueryHandler(self._handle_callback))
     
     async def _load_pairs(self):
@@ -1351,6 +1363,394 @@ class BotManager:
             
         except Exception as e:
             await update.message.reply_text(f"Error during cleanup: {e}")
+    
+    # Advanced filtering command handlers
+    async def _cmd_block_word(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Block word globally or for specific pair"""
+        if not self._is_admin(update.effective_user.id):
+            return
+        
+        try:
+            if len(context.args) < 1:
+                await update.message.reply_text(
+                    "Usage: /blockword <word> [pair_id]\n"
+                    "Without pair_id, blocks globally"
+                )
+                return
+            
+            word = context.args[0]
+            
+            if len(context.args) > 1:
+                # Block for specific pair
+                pair_id = int(context.args[1])
+                success = await self.message_filter.add_pair_word_block(pair_id, word)
+                if success:
+                    await update.message.reply_text(f"✅ Blocked word '{word}' for pair {pair_id}")
+                else:
+                    await update.message.reply_text(f"❌ Failed to block word for pair {pair_id}")
+            else:
+                # Block globally
+                await self.message_filter.add_global_word_block(word)
+                await update.message.reply_text(f"✅ Globally blocked word '{word}'")
+                
+        except ValueError:
+            await update.message.reply_text("Invalid pair ID.")
+        except Exception as e:
+            await update.message.reply_text(f"Error blocking word: {e}")
+    
+    async def _cmd_unblock_word(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Unblock word globally or for specific pair"""
+        if not self._is_admin(update.effective_user.id):
+            return
+        
+        try:
+            if len(context.args) < 1:
+                await update.message.reply_text(
+                    "Usage: /unblockword <word> [pair_id]\n"
+                    "Without pair_id, unblocks globally"
+                )
+                return
+            
+            word = context.args[0]
+            
+            if len(context.args) > 1:
+                # Unblock for specific pair
+                pair_id = int(context.args[1])
+                success = await self.message_filter.remove_pair_word_block(pair_id, word)
+                if success:
+                    await update.message.reply_text(f"✅ Unblocked word '{word}' for pair {pair_id}")
+                else:
+                    await update.message.reply_text(f"❌ Failed to unblock word for pair {pair_id}")
+            else:
+                # Unblock globally
+                await self.message_filter.remove_global_word_block(word)
+                await update.message.reply_text(f"✅ Globally unblocked word '{word}'")
+                
+        except ValueError:
+            await update.message.reply_text("Invalid pair ID.")
+        except Exception as e:
+            await update.message.reply_text(f"Error unblocking word: {e}")
+    
+    async def _cmd_list_blocked_words(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """List blocked words"""
+        if not self._is_admin(update.effective_user.id):
+            return
+        
+        try:
+            pair_id = None
+            if context.args:
+                pair_id = int(context.args[0])
+            
+            # Get global blocks
+            global_words = self.message_filter.global_blocks.get("words", [])
+            
+            blocked_text = "🚫 **Blocked Words:**\n\n"
+            
+            if global_words:
+                blocked_text += "**Global Blocks:**\n"
+                for word in global_words:
+                    blocked_text += f"• {word}\n"
+                blocked_text += "\n"
+            
+            if pair_id:
+                pair = self.pairs.get(pair_id)
+                if pair:
+                    pair_words = pair.filters.get("blocked_words", [])
+                    if pair_words:
+                        blocked_text += f"**Pair {pair_id} Blocks:**\n"
+                        for word in pair_words:
+                            blocked_text += f"• {word}\n"
+                    else:
+                        blocked_text += f"**Pair {pair_id}:** No blocked words\n"
+            else:
+                blocked_text += "Use `/listblocked <pair_id>` to see pair-specific blocks"
+            
+            await update.message.reply_text(blocked_text, parse_mode='Markdown')
+            
+        except ValueError:
+            await update.message.reply_text("Invalid pair ID.")
+        except Exception as e:
+            await update.message.reply_text(f"Error listing blocked words: {e}")
+    
+    async def _cmd_block_image(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Block image by replying to it"""
+        if not self._is_admin(update.effective_user.id):
+            return
+        
+        try:
+            reply_msg = update.message.reply_to_message
+            if not reply_msg or not reply_msg.photo:
+                await update.message.reply_text(
+                    "Reply to an image message to block it.\n"
+                    "Usage: /blockimage [pair_id] [description]\n"
+                    "Without pair_id, blocks globally"
+                )
+                return
+            
+            block_scope = "global"
+            pair_id = None
+            description = "Blocked via bot command"
+            
+            if context.args:
+                try:
+                    pair_id = int(context.args[0])
+                    block_scope = "pair"
+                    if len(context.args) > 1:
+                        description = " ".join(context.args[1:])
+                except ValueError:
+                    # First argument is description, not pair_id
+                    description = " ".join(context.args)
+            
+            # Create a mock event for image processing
+            class MockEvent:
+                def __init__(self, message):
+                    self.id = message.message_id
+                    self.media = message.photo[-1] if message.photo else None
+                    self.client = None  # Will need to be handled
+            
+            mock_event = MockEvent(reply_msg)
+            pair = self.pairs.get(pair_id) if pair_id else None
+            
+            success = await self.image_handler.add_image_block(
+                mock_event, pair, description, 
+                str(update.effective_user.id), block_scope
+            )
+            
+            if success:
+                scope_text = f"for pair {pair_id}" if block_scope == "pair" else "globally"
+                await update.message.reply_text(f"✅ Image blocked {scope_text}")
+            else:
+                await update.message.reply_text("❌ Failed to block image")
+                
+        except Exception as e:
+            await update.message.reply_text(f"Error blocking image: {e}")
+    
+    async def _cmd_unblock_image(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Unblock image by hash"""
+        if not self._is_admin(update.effective_user.id):
+            return
+        
+        try:
+            if not context.args:
+                await update.message.reply_text(
+                    "Usage: /unblockimage <image_hash> [pair_id]\n"
+                    "Without pair_id, removes global block"
+                )
+                return
+            
+            image_hash = context.args[0]
+            pair_id = int(context.args[1]) if len(context.args) > 1 else None
+            
+            success = await self.image_handler.remove_image_block(image_hash, pair_id)
+            
+            if success:
+                scope_text = f"for pair {pair_id}" if pair_id else "globally"
+                await update.message.reply_text(f"✅ Image unblocked {scope_text}")
+            else:
+                await update.message.reply_text("❌ Failed to unblock image")
+                
+        except ValueError:
+            await update.message.reply_text("Invalid pair ID.")
+        except Exception as e:
+            await update.message.reply_text(f"Error unblocking image: {e}")
+    
+    async def _cmd_list_blocked_images(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """List blocked images"""
+        if not self._is_admin(update.effective_user.id):
+            return
+        
+        try:
+            pair_id = int(context.args[0]) if context.args else None
+            
+            blocked_images = await self.image_handler.get_blocked_images(pair_id)
+            
+            if not blocked_images:
+                await update.message.reply_text("No blocked images found.")
+                return
+            
+            images_text = f"🖼️ **Blocked Images ({len(blocked_images)}):**\n\n"
+            
+            for img in blocked_images[:10]:  # Limit to 10 for readability
+                scope = img['block_scope']
+                images_text += f"**Hash:** `{img['phash'][:16]}...`\n"
+                images_text += f"**Scope:** {scope}"
+                if img['pair_id']:
+                    images_text += f" (Pair {img['pair_id']})"
+                images_text += f"\n**Used:** {img['usage_count']} times\n"
+                if img['description']:
+                    images_text += f"**Description:** {img['description']}\n"
+                images_text += "\n"
+            
+            if len(blocked_images) > 10:
+                images_text += f"... and {len(blocked_images) - 10} more images"
+            
+            await update.message.reply_text(images_text, parse_mode='Markdown')
+            
+        except ValueError:
+            await update.message.reply_text("Invalid pair ID.")
+        except Exception as e:
+            await update.message.reply_text(f"Error listing blocked images: {e}")
+    
+    async def _cmd_set_mention_removal(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Configure mention removal for pair"""
+        if not self._is_admin(update.effective_user.id):
+            return
+        
+        try:
+            if len(context.args) < 2:
+                await update.message.reply_text(
+                    "Usage: /mentions <pair_id> <enable|disable> [placeholder]\n"
+                    "Example: /mentions 1 enable [User]\n"
+                    "Example: /mentions 1 disable"
+                )
+                return
+            
+            pair_id = int(context.args[0])
+            action = context.args[1].lower()
+            placeholder = " ".join(context.args[2:]) if len(context.args) > 2 else ""
+            
+            if action not in ['enable', 'disable']:
+                await update.message.reply_text("Action must be 'enable' or 'disable'")
+                return
+            
+            remove_mentions = action == 'enable'
+            success = await self.message_filter.set_mention_removal(pair_id, remove_mentions, placeholder)
+            
+            if success:
+                if remove_mentions:
+                    placeholder_text = f" with placeholder '{placeholder}'" if placeholder else " (complete removal)"
+                    await update.message.reply_text(f"✅ Mention removal enabled for pair {pair_id}{placeholder_text}")
+                else:
+                    await update.message.reply_text(f"✅ Mention removal disabled for pair {pair_id}")
+            else:
+                await update.message.reply_text(f"❌ Failed to update mention removal for pair {pair_id}")
+                
+        except ValueError:
+            await update.message.reply_text("Invalid pair ID.")
+        except Exception as e:
+            await update.message.reply_text(f"Error configuring mention removal: {e}")
+    
+    async def _cmd_set_header_regex(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Set header removal regex for pair"""
+        if not self._is_admin(update.effective_user.id):
+            return
+        
+        try:
+            if len(context.args) < 2:
+                await update.message.reply_text(
+                    "Usage: /headerregex <pair_id> <regex_pattern>\n"
+                    "Use /headerregex <pair_id> clear to remove\n"
+                    "Example: /headerregex 1 ^.*?[:|：].*"
+                )
+                return
+            
+            pair_id = int(context.args[0])
+            pattern = " ".join(context.args[1:])
+            
+            if pattern.lower() == 'clear':
+                pattern = None
+            
+            success = await self.message_filter.set_pair_header_footer_regex(pair_id, header_regex=pattern)
+            
+            if success:
+                if pattern:
+                    await update.message.reply_text(f"✅ Header regex set for pair {pair_id}: `{pattern}`")
+                else:
+                    await update.message.reply_text(f"✅ Header regex cleared for pair {pair_id}")
+            else:
+                await update.message.reply_text(f"❌ Failed to set header regex for pair {pair_id}")
+                
+        except ValueError:
+            await update.message.reply_text("Invalid pair ID.")
+        except Exception as e:
+            await update.message.reply_text(f"Error setting header regex: {e}")
+    
+    async def _cmd_set_footer_regex(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Set footer removal regex for pair"""
+        if not self._is_admin(update.effective_user.id):
+            return
+        
+        try:
+            if len(context.args) < 2:
+                await update.message.reply_text(
+                    "Usage: /footerregex <pair_id> <regex_pattern>\n"
+                    "Use /footerregex <pair_id> clear to remove\n"
+                    "Example: /footerregex 1 @\\w+.*$"
+                )
+                return
+            
+            pair_id = int(context.args[0])
+            pattern = " ".join(context.args[1:])
+            
+            if pattern.lower() == 'clear':
+                pattern = None
+            
+            success = await self.message_filter.set_pair_header_footer_regex(pair_id, footer_regex=pattern)
+            
+            if success:
+                if pattern:
+                    await update.message.reply_text(f"✅ Footer regex set for pair {pair_id}: `{pattern}`")
+                else:
+                    await update.message.reply_text(f"✅ Footer regex cleared for pair {pair_id}")
+            else:
+                await update.message.reply_text(f"❌ Failed to set footer regex for pair {pair_id}")
+                
+        except ValueError:
+            await update.message.reply_text("Invalid pair ID.")
+        except Exception as e:
+            await update.message.reply_text(f"Error setting footer regex: {e}")
+    
+    async def _cmd_test_filter(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Test filtering on a message"""
+        if not self._is_admin(update.effective_user.id):
+            return
+        
+        try:
+            if not context.args:
+                await update.message.reply_text(
+                    "Usage: /testfilter <pair_id> <text_to_test>\n"
+                    "Example: /testfilter 1 Hello @username this is a test"
+                )
+                return
+            
+            pair_id = int(context.args[0])
+            test_text = " ".join(context.args[1:])
+            
+            if pair_id not in self.pairs:
+                await update.message.reply_text("Pair not found.")
+                return
+            
+            pair = self.pairs[pair_id]
+            
+            # Apply text filtering
+            filtered_text, entities = await self.message_filter.filter_text(test_text, pair, [])
+            
+            result_text = f"🧪 **Filter Test Results for Pair {pair_id}:**\n\n"
+            result_text += f"**Original:** {test_text}\n\n"
+            result_text += f"**Filtered:** {filtered_text}\n\n"
+            
+            # Show what filters would be applied
+            result_text += "**Active Filters:**\n"
+            filters = []
+            if pair.filters.get("remove_mentions"):
+                placeholder = pair.filters.get("mention_placeholder", "(removed)")
+                filters.append(f"• Mention removal: {placeholder}")
+            if pair.filters.get("header_regex"):
+                filters.append(f"• Header regex: `{pair.filters['header_regex']}`")
+            if pair.filters.get("footer_regex"):
+                filters.append(f"• Footer regex: `{pair.filters['footer_regex']}`")
+            
+            if filters:
+                result_text += "\n".join(filters)
+            else:
+                result_text += "No text filters configured"
+            
+            await update.message.reply_text(result_text, parse_mode='Markdown')
+            
+        except ValueError:
+            await update.message.reply_text("Invalid pair ID.")
+        except Exception as e:
+            await update.message.reply_text(f"Error testing filter: {e}")
     
     def _is_admin(self, user_id: int) -> bool:
         """Check if user is admin"""

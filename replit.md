@@ -40,22 +40,27 @@ The system follows a modular, async-first architecture with clear separation of 
   - Automatic failover and retry mechanisms
   - Rate limiting compliance
 
-### 2. Message Processor (`message_processor.py`)
-- **Purpose**: Handles core message copying logic with content transformation
+### 2. Message Processor (`message_processor.py`)  
+- **Purpose**: Handles core message copying logic with advanced content transformation
 - **Key Features**:
-  - Media handling (photos, videos, documents, audio)
-  - Reply chain preservation
-  - Edit/delete synchronization
-  - Content sanitization and transformation
+  - Full media handling (photos, videos, documents, audio) with entity preservation
+  - Premium content support (custom emojis, special formatting, web page previews)
+  - Complete reply chain preservation with mapping
+  - Real-time edit/delete synchronization
+  - Entity-aware content transformation maintaining formatting
+  - Mention processing with placeholder replacement
+  - Header/footer removal using regex patterns
 
 ### 3. Filter System (`filters.py`)
-- **Purpose**: Advanced message filtering with multiple criteria
+- **Purpose**: Advanced message filtering with multiple criteria and content transformation
 - **Key Features**:
-  - Word/phrase blocking with regex support
-  - Media type filtering
-  - Time-based filtering
-  - User-based filtering
-  - Global blocking rules
+  - Word/phrase blocking with regex support (global and pair-specific)
+  - Media type filtering with phash-based image duplicate detection
+  - Mention removal with customizable placeholders
+  - Regex-based header and footer removal per pair
+  - Time-based filtering and user-based filtering
+  - Entity preservation during text transformation
+  - Content length limits and custom regex filters
 
 ### 4. Database Manager (`database.py`)
 - **Purpose**: SQLite database operations with async support
@@ -66,11 +71,13 @@ The system follows a modular, async-first architecture with clear separation of 
   - Statistics tracking
 
 ### 5. Image Handler (`image_handler.py`)
-- **Purpose**: Duplicate image detection using perceptual hashing
+- **Purpose**: Comprehensive image blocking system with perceptual hashing
 - **Key Features**:
-  - Perceptual hash-based duplicate detection
-  - Configurable similarity thresholds
-  - Hash caching for performance
+  - Perceptual hash-based duplicate detection with configurable similarity thresholds
+  - Global and pair-specific image blocking with usage tracking
+  - Block management via bot commands with description and metadata
+  - Hash caching for performance optimization
+  - Automatic cleanup of unused blocks
 
 ### 6. Health Monitor (`health_monitor.py`)
 - **Purpose**: System health tracking and alerting
@@ -158,16 +165,22 @@ The system follows a modular, async-first architecture with clear separation of 
 
 ## Recent Changes
 
+### 2025-07-24: Complete Advanced Filtering System Implementation
+- **Comprehensive filtering system**: Implemented phash-based image blocking with global/pair-specific scopes
+- **Enhanced message processing**: Added full support for premium content, custom emojis, and special entities
+- **Advanced text filtering**: Implemented mention removal with placeholders and regex-based header/footer removal
+- **Bot command expansion**: Added 10+ new filtering commands for complete management
+- **Entity preservation**: Full support for preserving message formatting, entities, and reply chains
+- **Database enhancements**: Added blocked_images table with similarity thresholds and usage tracking
+
+#### New Filtering Features:
+- **Image blocking**: `/blockimage`, `/unblockimage`, `/listblockedimages` with perceptual hash similarity
+- **Word filtering**: `/blockword`, `/unblockword`, `/listblocked` with global and pair-specific blocks
+- **Advanced configuration**: `/mentions`, `/headerregex`, `/footerregex` for content transformation
+- **Filter testing**: `/testfilter` for real-time filter validation
+
 ### 2025-07-24: Web Dashboard Removal and Bot-Only Management
 - **Removed web dashboard components**: Deleted `web_dashboard.py`, `templates/`, `static/`, and `demo.py`
 - **Enhanced bot management**: Added 20+ new Telegram bot commands for comprehensive system control
 - **Updated main system**: Modified `main.py` to run without web dashboard dependencies
-- **New command categories**:
-  - System management: `/health`, `/restart`, `/diagnostics`
-  - Advanced pair management: `/editpair`, `/pairinfo`
-  - Bot monitoring: `/bots`, `/botinfo`, `/rebalance`
-  - Queue management: `/queue`, `/clearqueue`
-  - Log analysis: `/logs`, `/errors`
-  - Settings control: `/settings`, `/set`
-  - Utilities: `/backup`, `/cleanup`
 - **Architecture change**: System now operates entirely through Telegram bot commands, removing web interface dependency

@@ -6,7 +6,7 @@ import re
 import json
 import logging
 import asyncio
-from typing import Dict, List, Optional, Any, NamedTuple
+from typing import Dict, List, Optional, Any, NamedTuple, Union
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
@@ -138,19 +138,56 @@ class MessageFilter:
             logger.error(f"Error in message filtering: {e}")
             return FilterResult(False, f"Filter error: {e}", ["error"])
     
-    async def filter_text(self, text: str, pair: MessagePair) -> str:
-        """Apply text transformations and filtering"""
+    async def filter_text(self, text: str, pair: MessagePair, entities: List = None) -> tuple[str, List]:
+        """Apply text transformations and filtering with entity preservation"""
         try:
             filtered_text = text
+            processed_entities = entities.copy() if entities else []
+            
+            # Remove header/footer based on regex patterns (per-pair)
+            header_pattern = pair.filters.get("header_regex")
+            if header_pattern:
+                try:
+                    compiled_regex = self._get_compiled_regex(header_pattern)
+                    match = compiled_regex.search(filtered_text)
+                    if match:
+                        # Remove header and adjust entity offsets
+                        header_length = match.end()
+                        filtered_text = filtered_text[header_length:]
+                        processed_entities = self._adjust_entities_after_removal(
+                            processed_entities, 0, header_length
+                        )
+                except re.error as e:
+                    logger.warning(f"Invalid header regex pattern {header_pattern}: {e}")
+            
+            footer_pattern = pair.filters.get("footer_regex")
+            if footer_pattern:
+                try:
+                    compiled_regex = self._get_compiled_regex(footer_pattern)
+                    match = compiled_regex.search(filtered_text)
+                    if match:
+                        # Remove footer
+                        footer_start = match.start()
+                        filtered_text = filtered_text[:footer_start]
+                        # Remove entities that fall in the footer area
+                        processed_entities = [
+                            e for e in processed_entities 
+                            if getattr(e, 'offset', 0) + getattr(e, 'length', 0) <= footer_start
+                        ]
+                except re.error as e:
+                    logger.warning(f"Invalid footer regex pattern {footer_pattern}: {e}")
+            
+            # Process mentions with optional placeholders
+            if pair.filters.get("remove_mentions", False):
+                filtered_text, processed_entities = self._process_mentions(
+                    filtered_text, processed_entities, pair
+                )
             
             # Apply word replacements
             word_replacements = pair.filters.get("word_replacements", {})
             for old_word, new_word in word_replacements.items():
-                filtered_text = re.sub(
-                    re.escape(old_word), 
-                    new_word, 
-                    filtered_text, 
-                    flags=re.IGNORECASE
+                filtered_text, processed_entities = self._replace_text_with_entities(
+                    filtered_text, processed_entities, old_word, new_word
                 )
             
             # Apply regex replacements
@@ -158,18 +195,22 @@ class MessageFilter:
             for pattern, replacement in regex_replacements.items():
                 try:
                     compiled_regex = self._get_compiled_regex(pattern)
-                    filtered_text = compiled_regex.sub(replacement, filtered_text)
+                    filtered_text, processed_entities = self._regex_replace_with_entities(
+                        filtered_text, processed_entities, compiled_regex, replacement
+                    )
                 except re.error as e:
                     logger.warning(f"Invalid regex pattern {pattern}: {e}")
             
-            # Remove extra whitespace
-            filtered_text = re.sub(r'\s+', ' ', filtered_text).strip()
+            # Remove extra whitespace while preserving entities
+            filtered_text, processed_entities = self._normalize_whitespace_with_entities(
+                filtered_text, processed_entities
+            )
             
-            return filtered_text
+            return filtered_text, processed_entities
             
         except Exception as e:
             logger.error(f"Error filtering text: {e}")
-            return text
+            return text, entities or []
     
     async def _check_global_word_blocks(self, text: str) -> bool:
         """Check against global blocked words"""
@@ -375,3 +416,306 @@ class MessageFilter:
         """Clear compiled regex cache"""
         self._regex_cache.clear()
         logger.info("Regex cache cleared")
+    
+    def _process_mentions(self, text: str, entities: List, pair: MessagePair) -> tuple[str, List]:
+        """Process mentions with optional placeholders"""
+        try:
+            mention_placeholder = pair.filters.get("mention_placeholder", "")
+            filtered_text = text
+            processed_entities = []
+            offset_adjustment = 0
+            
+            for entity in entities or []:
+                entity_type = getattr(entity, '__class__', {}).get('__name__', str(type(entity)))
+                
+                # Check if this is a mention entity
+                if any(mention_type in entity_type.lower() for mention_type in 
+                       ['mention', 'textmention', 'username']):
+                    
+                    entity_offset = getattr(entity, 'offset', 0)
+                    entity_length = getattr(entity, 'length', 0)
+                    
+                    # Adjust for previous replacements
+                    adjusted_offset = entity_offset + offset_adjustment
+                    
+                    # Extract mention text
+                    mention_text = filtered_text[adjusted_offset:adjusted_offset + entity_length]
+                    
+                    # Replace with placeholder or remove
+                    if mention_placeholder:
+                        filtered_text = (
+                            filtered_text[:adjusted_offset] + 
+                            mention_placeholder + 
+                            filtered_text[adjusted_offset + entity_length:]
+                        )
+                        # Adjust offset for length difference
+                        length_diff = len(mention_placeholder) - entity_length
+                        offset_adjustment += length_diff
+                    else:
+                        # Remove mention completely
+                        filtered_text = (
+                            filtered_text[:adjusted_offset] + 
+                            filtered_text[adjusted_offset + entity_length:]
+                        )
+                        offset_adjustment -= entity_length
+                    
+                    # Don't include mention entities in final list
+                    continue
+                
+                # Adjust entity offset for previous changes
+                if hasattr(entity, 'offset'):
+                    entity.offset += offset_adjustment
+                processed_entities.append(entity)
+            
+            return filtered_text, processed_entities
+            
+        except Exception as e:
+            logger.error(f"Error processing mentions: {e}")
+            return text, entities or []
+    
+    def _adjust_entities_after_removal(self, entities: List, start_pos: int, removed_length: int) -> List:
+        """Adjust entity offsets after text removal"""
+        adjusted_entities = []
+        
+        for entity in entities or []:
+            entity_offset = getattr(entity, 'offset', 0)
+            entity_length = getattr(entity, 'length', 0)
+            
+            # Skip entities that are completely within the removed section
+            if entity_offset >= start_pos and entity_offset + entity_length <= start_pos + removed_length:
+                continue
+            
+            # Adjust entities that come after the removed section
+            if entity_offset >= start_pos + removed_length:
+                entity.offset = entity_offset - removed_length
+                adjusted_entities.append(entity)
+            # Keep entities that come before the removed section
+            elif entity_offset + entity_length <= start_pos:
+                adjusted_entities.append(entity)
+            # Handle entities that partially overlap (truncate them)
+            else:
+                if entity_offset < start_pos:
+                    # Entity starts before removal, truncate its length
+                    entity.length = start_pos - entity_offset
+                    adjusted_entities.append(entity)
+        
+        return adjusted_entities
+    
+    def _replace_text_with_entities(self, text: str, entities: List, old_text: str, new_text: str) -> tuple[str, List]:
+        """Replace text while preserving entity positions"""
+        try:
+            filtered_text = text
+            processed_entities = entities.copy() if entities else []
+            offset_adjustment = 0
+            
+            # Find all occurrences of old_text
+            pattern = re.compile(re.escape(old_text), re.IGNORECASE)
+            matches = list(pattern.finditer(text))
+            
+            # Process matches in reverse order to maintain offsets
+            for match in reversed(matches):
+                start, end = match.span()
+                
+                # Replace the text
+                filtered_text = filtered_text[:start] + new_text + filtered_text[end:]
+                
+                # Adjust entity offsets
+                length_diff = len(new_text) - (end - start)
+                for entity in processed_entities:
+                    entity_offset = getattr(entity, 'offset', 0)
+                    if entity_offset > start:
+                        entity.offset += length_diff
+            
+            return filtered_text, processed_entities
+            
+        except Exception as e:
+            logger.error(f"Error replacing text with entities: {e}")
+            return text, entities or []
+    
+    def _regex_replace_with_entities(self, text: str, entities: List, 
+                                   compiled_regex: re.Pattern, replacement: str) -> tuple[str, List]:
+        """Apply regex replacement while preserving entities"""
+        try:
+            # Find all matches first
+            matches = list(compiled_regex.finditer(text))
+            if not matches:
+                return text, entities or []
+            
+            filtered_text = text
+            processed_entities = entities.copy() if entities else []
+            
+            # Process matches in reverse order
+            for match in reversed(matches):
+                start, end = match.span()
+                
+                # Apply replacement
+                match_replacement = compiled_regex.sub(replacement, match.group())
+                filtered_text = filtered_text[:start] + match_replacement + filtered_text[end:]
+                
+                # Adjust entity offsets
+                length_diff = len(match_replacement) - (end - start)
+                for entity in processed_entities:
+                    entity_offset = getattr(entity, 'offset', 0)
+                    if entity_offset > start:
+                        entity.offset += length_diff
+            
+            return filtered_text, processed_entities
+            
+        except Exception as e:
+            logger.error(f"Error in regex replacement with entities: {e}")
+            return text, entities or []
+    
+    def _normalize_whitespace_with_entities(self, text: str, entities: List) -> tuple[str, List]:
+        """Normalize whitespace while preserving entity positions"""
+        try:
+            # Create mapping of old positions to new positions
+            filtered_text = ""
+            position_map = {}
+            old_pos = 0
+            new_pos = 0
+            
+            # Normalize whitespace and track position changes
+            i = 0
+            while i < len(text):
+                position_map[i] = new_pos
+                
+                if text[i].isspace():
+                    # Skip consecutive whitespace, keep only one space
+                    if not filtered_text or not filtered_text[-1].isspace():
+                        filtered_text += " "
+                        new_pos += 1
+                    
+                    # Skip additional whitespace
+                    while i < len(text) and text[i].isspace():
+                        position_map[i] = new_pos - 1 if filtered_text and filtered_text[-1].isspace() else new_pos
+                        i += 1
+                    continue
+                else:
+                    filtered_text += text[i]
+                    new_pos += 1
+                    i += 1
+            
+            # Add final position mapping
+            position_map[len(text)] = len(filtered_text)
+            
+            # Adjust entities
+            processed_entities = []
+            for entity in entities or []:
+                entity_offset = getattr(entity, 'offset', 0)
+                entity_length = getattr(entity, 'length', 0)
+                
+                # Map old positions to new positions
+                new_offset = position_map.get(entity_offset, entity_offset)
+                new_end = position_map.get(entity_offset + entity_length, entity_offset + entity_length)
+                new_length = new_end - new_offset
+                
+                if new_length > 0:
+                    entity.offset = new_offset
+                    entity.length = new_length
+                    processed_entities.append(entity)
+            
+            return filtered_text.strip(), processed_entities
+            
+        except Exception as e:
+            logger.error(f"Error normalizing whitespace with entities: {e}")
+            return text, entities or []
+    
+    async def add_pair_word_block(self, pair_id: int, word: str):
+        """Add word to pair-specific block list"""
+        try:
+            pair = await self.db_manager.get_pair_by_id(pair_id)
+            if not pair:
+                return False
+            
+            blocked_words = pair.filters.get("blocked_words", [])
+            if word not in blocked_words:
+                blocked_words.append(word)
+                pair.filters["blocked_words"] = blocked_words
+                await self.db_manager.update_pair(pair)
+                logger.info(f"Added word block for pair {pair_id}: {word}")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Failed to add pair word block: {e}")
+            return False
+    
+    async def remove_pair_word_block(self, pair_id: int, word: str):
+        """Remove word from pair-specific block list"""
+        try:
+            pair = await self.db_manager.get_pair_by_id(pair_id)
+            if not pair:
+                return False
+            
+            blocked_words = pair.filters.get("blocked_words", [])
+            if word in blocked_words:
+                blocked_words.remove(word)
+                pair.filters["blocked_words"] = blocked_words
+                await self.db_manager.update_pair(pair)
+                logger.info(f"Removed word block for pair {pair_id}: {word}")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Failed to remove pair word block: {e}")
+            return False
+    
+    async def set_pair_header_footer_regex(self, pair_id: int, header_regex: str = None, footer_regex: str = None):
+        """Set header/footer regex patterns for pair"""
+        try:
+            pair = await self.db_manager.get_pair_by_id(pair_id)
+            if not pair:
+                return False
+            
+            if header_regex is not None:
+                if header_regex:
+                    # Validate regex
+                    try:
+                        re.compile(header_regex)
+                        pair.filters["header_regex"] = header_regex
+                    except re.error as e:
+                        logger.error(f"Invalid header regex: {e}")
+                        return False
+                else:
+                    # Remove header regex
+                    pair.filters.pop("header_regex", None)
+            
+            if footer_regex is not None:
+                if footer_regex:
+                    # Validate regex
+                    try:
+                        re.compile(footer_regex)
+                        pair.filters["footer_regex"] = footer_regex
+                    except re.error as e:
+                        logger.error(f"Invalid footer regex: {e}")
+                        return False
+                else:
+                    # Remove footer regex
+                    pair.filters.pop("footer_regex", None)
+            
+            await self.db_manager.update_pair(pair)
+            logger.info(f"Updated header/footer regex for pair {pair_id}")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Failed to set header/footer regex: {e}")
+            return False
+    
+    async def set_mention_removal(self, pair_id: int, remove_mentions: bool, placeholder: str = ""):
+        """Configure mention removal for pair"""
+        try:
+            pair = await self.db_manager.get_pair_by_id(pair_id)
+            if not pair:
+                return False
+            
+            pair.filters["remove_mentions"] = remove_mentions
+            if remove_mentions and placeholder:
+                pair.filters["mention_placeholder"] = placeholder
+            else:
+                pair.filters.pop("mention_placeholder", None)
+            
+            await self.db_manager.update_pair(pair)
+            logger.info(f"Updated mention removal for pair {pair_id}: {remove_mentions}")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Failed to set mention removal: {e}")
+            return False

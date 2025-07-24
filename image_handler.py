@@ -67,7 +67,7 @@ class ImageHandler:
             logger.error(f"Error checking image block: {e}")
             return False
     
-    async def add_image_block(self, event, pair: MessagePair, 
+    async def add_image_block(self, event, pair: Optional[MessagePair] = None, 
                              description: str = "", 
                              blocked_by: str = "",
                              block_scope: str = "pair",
@@ -93,7 +93,7 @@ class ImageHandler:
                     VALUES (?, ?, ?, ?, ?, ?)
                 ''', (
                     image_hash,
-                    pair.id if block_scope == "pair" else None,
+                    pair.id if (pair and block_scope == "pair") else None,
                     description,
                     blocked_by,
                     block_scope,
@@ -315,6 +315,31 @@ class ImageHandler:
         except Exception as e:
             logger.error(f"Failed to get image stats: {e}")
             return {}
+    
+    async def remove_image_block(self, image_hash: str, pair_id: Optional[int] = None) -> bool:
+        """Remove image block by hash"""
+        try:
+            async with self.db_manager.get_connection() as conn:
+                if pair_id:
+                    # Remove pair-specific block
+                    await conn.execute('''
+                        DELETE FROM blocked_images 
+                        WHERE phash = ? AND pair_id = ?
+                    ''', (image_hash, pair_id))
+                else:
+                    # Remove global block
+                    await conn.execute('''
+                        DELETE FROM blocked_images 
+                        WHERE phash = ? AND block_scope = 'global'
+                    ''', (image_hash,))
+                
+                await conn.commit()
+                logger.info(f"Removed image block: {image_hash[:16]}...")
+                return True
+                
+        except Exception as e:
+            logger.error(f"Error removing image block: {e}")
+            return False
     
     def clear_cache(self):
         """Clear hash cache"""
