@@ -229,8 +229,7 @@ class BotManager:
                 self.config.API_HASH
             )
             
-            if self.telethon_client:
-                await self.telethon_client.start(phone=self.config.PHONE_NUMBER)
+            await self.telethon_client.start(phone=self.config.PHONE_NUMBER)
             logger.info("Telethon client initialized")
             
             # Setup message handlers
@@ -790,10 +789,9 @@ class BotManager:
         if not update.message:
             return
         
-        help_text = """
-🤖 **Telegram Message Copying Bot**
+        help_text = """🤖 Telegram Message Copying Bot
 
-**System Management:**
+System Management:
 /status - System status and overview
 /stats - Detailed statistics
 /health - Health monitoring
@@ -801,32 +799,32 @@ class BotManager:
 /resume - Resume message processing
 /restart - Restart bot system
 
-**Pair Management:**
+Pair Management:
 /pairs - List all message pairs
 /addpair <source> <dest> <name> - Add new pair
 /delpair <id> - Delete pair
 /editpair <id> <setting> <value> - Edit pair settings
 /pairinfo <id> - Detailed pair information
 
-**Bot Management:**
+Bot Management:
 /bots - List all bot instances
 /botinfo <index> - Detailed bot information
 /rebalance - Rebalance message distribution
 
-**Queue & Processing:**
+Queue & Processing:
 /queue - View message queue status
 /clearqueue - Clear message queue
 
-**Logs & Diagnostics:**
+Logs & Diagnostics:
 /logs [limit] - View recent log entries
 /errors [limit] - View recent errors
 /diagnostics - Run system diagnostics
 
-**Settings:**
+Settings:
 /settings - View current settings
 /set <key> <value> - Update setting
 
-**Content Filtering:**
+Content Filtering:
 /blockword <word> [pair_id] - Block word globally or for pair
 /unblockword <word> [pair_id] - Unblock word
 /listblocked [pair_id] - List blocked words
@@ -834,23 +832,23 @@ class BotManager:
 /unblockimage <pair_id> <hash> - Unblock image
 /listblockedimages <pair_id> - List blocked images
 
-**Text Processing:**
+Text Processing:
 /mentions <pair_id> <enable|disable> [placeholder] - Configure mention removal
 /headerregex <pair_id> <pattern> - Set header removal regex
 /footerregex <pair_id> <pattern> - Set footer removal regex
 /testfilter <pair_id> <text> - Test filtering on text
 
-**Utilities:**
+Utilities:
 /backup - Create database backup
 /cleanup [--force] - Clean old data (preview or execute)
 
-**Bot Token Management:**
+Bot Token Management:
 /addtoken <name> <token> - Add new bot token
 /listtokens [--all] - List bot tokens
 /deletetoken <token_id> - Delete bot token
 /toggletoken <token_id> - Enable/disable bot token
 
-**Features:**
+Features:
 ✅ Multi-bot support with load balancing
 ✅ Bot token management via commands
 ✅ Advanced message filtering with word/image blocking
@@ -859,8 +857,7 @@ class BotManager:
 ✅ Reply preservation and webpage preview handling
 ✅ Edit/delete sync with formatting preservation
 ✅ Mention removal and header/footer regex filtering
-✅ Comprehensive statistics and auto-cleanup
-        """
+✅ Comprehensive statistics and auto-cleanup"""
         
         await update.message.reply_text(help_text, parse_mode=None)
     
@@ -894,14 +891,16 @@ class BotManager:
 **Uptime:** {self._get_uptime()}
             """
             
-            await update.message.reply_text(status_text, parse_mode='Markdown')
+            if update.message:
+                await update.message.reply_text(status_text, parse_mode='Markdown')
             
         except Exception as e:
-            await update.message.reply_text(f"Error getting status: {e}")
+            if update.message:
+                await update.message.reply_text(f"Error getting status: {e}")
     
     async def _cmd_stats(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Statistics command handler"""
-        if not self._is_admin(update.effective_user.id):
+        if not update.effective_user or not self._is_admin(update.effective_user.id) or not update.message:
             return
         
         try:
@@ -938,7 +937,7 @@ class BotManager:
     
     async def _cmd_pairs(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """List pairs command handler"""
-        if not self._is_admin(update.effective_user.id):
+        if not update.effective_user or not self._is_admin(update.effective_user.id) or not update.message:
             return
         
         try:
@@ -961,7 +960,8 @@ class BotManager:
             await update.message.reply_text(pairs_text, parse_mode='Markdown')
             
         except Exception as e:
-            await update.message.reply_text(f"Error listing pairs: {e}")
+            if update.message:
+                await update.message.reply_text(f"Error listing pairs: {e}")
     
     async def _cmd_pause(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Pause system command handler"""
@@ -999,7 +999,7 @@ class BotManager:
     
     async def _cmd_add_pair(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Add pair command handler with optional bot token selection"""
-        if not update.effective_user or not self._is_admin(update.effective_user.id):
+        if not update.effective_user or not self._is_admin(update.effective_user.id) or not update.message:
             return
         
         try:
@@ -1046,13 +1046,15 @@ class BotManager:
             )
             
         except ValueError as e:
-            await update.message.reply_text(f"Error: {e}")
+            if update.message:
+                await update.message.reply_text(f"Error: {e}")
         except Exception as e:
-            await update.message.reply_text(f"Error adding pair: {e}")
+            if update.message:
+                await update.message.reply_text(f"Error adding pair: {e}")
     
     async def _cmd_delete_pair(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Delete pair command handler"""
-        if not update.effective_user or not self._is_admin(update.effective_user.id):
+        if not update.effective_user or not self._is_admin(update.effective_user.id) or not update.message:
             return
         
         try:
@@ -1073,9 +1075,11 @@ class BotManager:
             await update.message.reply_text(f"✅ Deleted pair: {pair_name}")
             
         except ValueError:
-            await update.message.reply_text("Invalid pair ID.")
+            if update.message:
+                await update.message.reply_text("Invalid pair ID.")
         except Exception as e:
-            await update.message.reply_text(f"Error deleting pair: {e}")
+            if update.message:
+                await update.message.reply_text(f"Error deleting pair: {e}")
     
     async def _handle_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle callback queries"""
@@ -1086,7 +1090,7 @@ class BotManager:
     # Enhanced command handlers
     async def _cmd_health(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Health monitoring command"""
-        if not update.effective_user or not self._is_admin(update.effective_user.id):
+        if not update.effective_user or not self._is_admin(update.effective_user.id) or not update.message:
             return
         
         try:

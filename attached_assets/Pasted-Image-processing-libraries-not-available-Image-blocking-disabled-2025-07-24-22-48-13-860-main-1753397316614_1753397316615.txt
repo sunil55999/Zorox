@@ -1,0 +1,116 @@
+Image processing libraries not available. Image blocking disabled.
+2025-07-24 22:48:13,860 - __main__ - INFO - Starting Telegram Bot System initialization...
+2025-07-24 22:48:13,861 - config - WARNING - MESSAGE_QUEUE_SIZE is 1000, consider increasing to 50000+ for optimal 100+ pairs performance
+2025-07-24 22:48:13,861 - config - INFO - Environment configuration validated successfully
+2025-07-24 22:48:13,867 - database - INFO - Database initialized: bot.db
+2025-07-24 22:48:13,936 - bot_manager - WARNING - Admin bot connection attempt 1 failed: Unknown error in HTTP implementation: RuntimeError("Running with asyncio requires installation of 'httpcore[asyncio]'.")
+2025-07-24 22:48:15,940 - bot_manager - WARNING - Admin bot connection attempt 2 failed: Unknown error in HTTP implementation: RuntimeError("Running with asyncio requires installation of 'httpcore[asyncio]'.")
+2025-07-24 22:48:17,942 - bot_manager - ERROR - Failed to initialize bots: Unknown error in HTTP implementation: RuntimeError("Running with asyncio requires installation of 'httpcore[asyncio]'.")
+2025-07-24 22:48:17,942 - bot_manager - ERROR - Failed to initialize bot manager: Unknown error in HTTP implementation: RuntimeError("Running with asyncio requires installation of 'httpcore[asyncio]'.")
+2025-07-24 22:48:17,943 - __main__ - ERROR - Failed to initialize system: Unknown error in HTTP implementation: RuntimeError("Running with asyncio requires installation of 'httpcore[asyncio]'.")
+Traceback (most recent call last):
+  File "/home/runner/workspace/.pythonlibs/lib/python3.11/site-packages/httpcore/_async/connection_pool.py", line 228, in handle_async_request
+    closing = self._assign_requests_to_connections()
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/runner/workspace/.pythonlibs/lib/python3.11/site-packages/httpcore/_async/connection_pool.py", line 328, in _assign_requests_to_connections
+    pool_request.assign_to_connection(connection)
+  File "/home/runner/workspace/.pythonlibs/lib/python3.11/site-packages/httpcore/_async/connection_pool.py", line 25, in assign_to_connection
+    self._connection_acquired.set()
+  File "/home/runner/workspace/.pythonlibs/lib/python3.11/site-packages/httpcore/_synchronization.py", line 130, in set
+    self.setup()
+  File "/home/runner/workspace/.pythonlibs/lib/python3.11/site-packages/httpcore/_synchronization.py", line 122, in setup
+    self._backend = current_async_library()
+                    ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/runner/workspace/.pythonlibs/lib/python3.11/site-packages/httpcore/_synchronization.py", line 36, in current_async_library
+    raise RuntimeError(
+RuntimeError: Running with asyncio requires installation of 'httpcore[asyncio]'.
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/home/runner/workspace/.pythonlibs/lib/python3.11/site-packages/telegram/request/_baserequest.py", line 304, in _request_wrapper
+    code, payload = await self.do_request(
+                    ^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/runner/workspace/.pythonlibs/lib/python3.11/site-packages/telegram/request/_httpxrequest.py", line 273, in do_request
+    res = await self._client.request(
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/runner/workspace/.pythonlibs/lib/python3.11/site-packages/httpx/_client.py", line 1540, in request
+    return await self.send(request, auth=auth, follow_redirects=follow_redirects)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/runner/workspace/.pythonlibs/lib/python3.11/site-packages/httpx/_client.py", line 1629, in send
+    response = await self._send_handling_auth(
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/runner/workspace/.pythonlibs/lib/python3.11/site-packages/httpx/_client.py", line 1657, in _send_handling_auth
+    response = await self._send_handling_redirects(
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/runner/workspace/.pythonlibs/lib/python3.11/site-packages/httpx/_client.py", line 1694, in _send_handling_redirects
+    response = await self._send_single_request(request)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/runner/workspace/.pythonlibs/lib/python3.11/site-packages/httpx/_client.py", line 1730, in _send_single_request
+    response = await transport.handle_async_request(request)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/runner/workspace/.pythonlibs/lib/python3.11/site-packages/httpx/_transports/default.py", line 394, in handle_async_request
+    resp = await self._pool.handle_async_request(req)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/runner/workspace/.pythonlibs/lib/python3.11/site-packages/httpcore/_async/connection_pool.py", line 255, in handle_async_request
+    await self._close_connections(closing)
+  File "/home/runner/workspace/.pythonlibs/lib/python3.11/site-packages/httpcore/_async/connection_pool.py", line 343, in _close_connections
+    with AsyncShieldCancellation():
+         ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/runner/workspace/.pythonlibs/lib/python3.11/site-packages/httpcore/_synchronization.py", line 203, in __init__
+    self._backend = current_async_library()
+                    ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/runner/workspace/.pythonlibs/lib/python3.11/site-packages/httpcore/_synchronization.py", line 36, in current_async_library
+    raise RuntimeError(
+RuntimeError: Running with asyncio requires installation of 'httpcore[asyncio]'.
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/home/runner/workspace/main.py", line 61, in initialize
+    await self.bot_manager.initialize()
+  File "/home/runner/workspace/bot_manager.py", line 121, in initialize
+    await self._init_telegram_bots()
+  File "/home/runner/workspace/bot_manager.py", line 163, in _init_telegram_bots
+    me = await self.admin_bot.get_me()
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/runner/workspace/.pythonlibs/lib/python3.11/site-packages/telegram/_bot.py", line 976, in get_me
+    result = await self._post(
+             ^^^^^^^^^^^^^^^^^
+  File "/home/runner/workspace/.pythonlibs/lib/python3.11/site-packages/telegram/_bot.py", line 698, in _post
+    return await self._do_post(
+           ^^^^^^^^^^^^^^^^^^^^
+  File "/home/runner/workspace/.pythonlibs/lib/python3.11/site-packages/telegram/_bot.py", line 727, in _do_post
+    result = await request.post(
+             ^^^^^^^^^^^^^^^^^^^
+  File "/home/runner/workspace/.pythonlibs/lib/python3.11/site-packages/telegram/request/_baserequest.py", line 197, in post
+    result = await self._request_wrapper(
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/runner/workspace/.pythonlibs/lib/python3.11/site-packages/telegram/request/_baserequest.py", line 316, in _request_wrapper
+    raise NetworkError(f"Unknown error in HTTP implementation: {exc!r}") from exc
+telegram.error.NetworkError: Unknown error in HTTP implementation: RuntimeError("Running with asyncio requires installation of 'httpcore[asyncio]'.")
+2025-07-24 22:48:17,947 - __main__ - ERROR - Fatal error: Unknown error in HTTP implementation: RuntimeError("Running with asyncio requires installation of 'httpcore[asyncio]'.")
+Traceback (most recent call last):
+  File "/home/runner/workspace/.pythonlibs/lib/python3.11/site-packages/httpcore/_async/connection_pool.py", line 228, in handle_async_request
+    closing = self._assign_requests_to_connections()
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/runner/workspace/.pythonlibs/lib/python3.11/site-packages/httpcore/_async/connection_pool.py", line 328, in _assign_requests_to_connections
+    pool_request.assign_to_connection(connection)
+  File "/home/runner/workspace/.pythonlibs/lib/python3.11/site-packages/httpcore/_async/connection_pool.py", line 25, in assign_to_connection
+    self._connection_acquired.set()
+  File "/home/runner/workspace/.pythonlibs/lib/python3.11/site-packages/httpcore/_synchronization.py", line 130, in set
+    self.setup()
+  File "/home/runner/workspace/.pythonlibs/lib/python3.11/site-packages/httpcore/_synchronization.py", line 122, in setup
+    self._backend = current_async_library()
+                    ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/runner/workspace/.pythonlibs/lib/python3.11/site-packages/httpcore/_synchronization.py", line 36, in current_async_library
+    raise RuntimeError(
+RuntimeError: Running with asyncio requires installation of 'httpcore[asyncio]'.
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/home/runner/workspace/.pythonlibs/lib/python3.11/site-packages/telegram/request/_baserequest.py", line 304, in _request_wrapper
+    code, payload = await self.do_request(
+                    ^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/runner/workspace/.pythonlibs/lib/python3.11/site-packages/telegram/request/_httpxrequest.py", line 273, in do_req

@@ -5,7 +5,11 @@ description = "Add your description here"
 requires-python = ">=3.11"
 dependencies = [
     "aiosqlite>=0.21.0",
-    "httpcore[asyncio]>=1.0.9",
+    "anyio>=4.9.0",
+    "certifi>=2025.7.14",
+    "h11>=0.16.0",
+    "httpcore[asyncio,trio]>=1.0.9",
+    "httpx>=0.28.1",
     "imagehash>=4.3.2",
     "pillow>=11.3.0",
     "psutil>=7.0.0",
@@ -13,6 +17,9 @@ dependencies = [
     "pytest-asyncio>=1.1.0",
     "python-dotenv>=1.1.1",
     "python-telegram-bot>=22.3",
+    "sniffio>=1.3.1",
     "telegram>=0.0.1",
     "telethon>=1.40.0",
+    "trio>=0.30.0",
+    "trio-typing>=0.10.0",
 ]

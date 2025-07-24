@@ -72,6 +72,9 @@ class Config:
         # Filtering settings
         self.GLOBAL_BLOCKED_WORDS = self._parse_blocked_words()
         
+        # Image processing settings
+        self.ENABLE_IMAGE_PROCESSING = os.getenv('ENABLE_IMAGE_PROCESSING', 'true').lower() == 'true'
+        
     def _parse_blocked_words(self) -> List[str]:
         """Parse global blocked words from environment"""
         blocked_words_str = os.getenv('GLOBAL_BLOCKED_WORDS', 'join,promo,subscribe,contact,spam,advertisement,click here,telegram,dm me,private message')

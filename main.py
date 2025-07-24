@@ -12,6 +12,46 @@ import time
 from typing import Dict, List, Optional
 from datetime import datetime
 
+# Force asyncio backend detection for httpcore - comprehensive fix
+import sniffio
+import asyncio
+try:
+    # Ensure proper asyncio setup 
+    asyncio.set_event_loop_policy(asyncio.DefaultEventLoopPolicy())
+    
+    # Create and set a new event loop if needed
+    try:
+        loop = asyncio.get_event_loop()
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+    
+    # Monkey patch current_async_library to always return asyncio
+    original_current_async_library = sniffio.current_async_library
+    def patched_current_async_library():
+        try:
+            result = original_current_async_library()
+            return result if result else "asyncio"
+        except:
+            return "asyncio"
+    
+    sniffio.current_async_library = patched_current_async_library
+    
+    # Also patch httpcore's detection and async backend
+    import httpcore._synchronization
+    httpcore._synchronization.current_async_library = patched_current_async_library
+    
+    # Ensure AsyncBackend selection works properly for asyncio
+    try:
+        import httpcore._backends._asyncio
+        # Force asyncio backend initialization
+        httpcore_asyncio_backend = httpcore._backends._asyncio.AsyncioBackend()
+    except Exception as be:
+        print(f"Backend initialization failed: {be}")
+    
+except Exception as e:
+    print(f"Failed to patch asyncio detection: {e}")
+
 from config import Config, validate_environment
 from database import DatabaseManager
 from bot_manager import BotManager
