@@ -765,18 +765,33 @@ class BotManager:
 /settings - View current settings
 /set <key> <value> - Update setting
 
+**Content Filtering:**
+/blockword <word> [pair_id] - Block word globally or for pair
+/unblockword <word> [pair_id] - Unblock word
+/listblocked [pair_id] - List blocked words
+/blockimage <pair_id> - Block image via reply
+/unblockimage <pair_id> <hash> - Unblock image
+/listblockedimages <pair_id> - List blocked images
+
+**Text Processing:**
+/mentions <pair_id> <enable|disable> [placeholder] - Configure mention removal
+/headerregex <pair_id> <pattern> - Set header removal regex
+/footerregex <pair_id> <pattern> - Set footer removal regex
+/testfilter <pair_id> <text> - Test filtering on text
+
 **Utilities:**
 /backup - Create database backup
-/cleanup - Clean old data
+/cleanup [--force] - Clean old data (preview or execute)
 
 **Features:**
 ✅ Multi-bot support with load balancing
-✅ Advanced message filtering
-✅ Real-time synchronization
-✅ Image duplicate detection
-✅ Reply preservation
-✅ Edit/delete sync
-✅ Comprehensive statistics
+✅ Advanced message filtering with word/image blocking
+✅ Real-time synchronization with premium emoji support
+✅ Image duplicate detection and processing
+✅ Reply preservation and webpage preview handling
+✅ Edit/delete sync with formatting preservation
+✅ Mention removal and header/footer regex filtering
+✅ Comprehensive statistics and auto-cleanup
         """
         
         await update.message.reply_text(help_text, parse_mode='Markdown')
@@ -1397,8 +1412,53 @@ class BotManager:
             return
         
         try:
-            # Placeholder for cleanup functionality
-            await update.message.reply_text("🧹 Database cleanup functionality not yet implemented.")
+            if context.args and context.args[0].lower() in ['--force', '-f']:
+                # Perform actual cleanup
+                await update.message.reply_text("🧹 Starting database cleanup...")
+                
+                # Clean old messages (older than 30 days)
+                cutoff_time = time.time() - (30 * 24 * 60 * 60)  # 30 days ago
+                cleaned_messages = await self.db_manager.cleanup_old_messages(cutoff_time)
+                
+                # Clean old errors (older than 7 days)
+                error_cutoff = time.time() - (7 * 24 * 60 * 60)  # 7 days ago
+                cleaned_errors = await self.db_manager.cleanup_old_errors(error_cutoff)
+                
+                # Clean orphaned image hashes
+                cleaned_hashes = await self.image_handler.cleanup_orphaned_hashes() if self.image_handler else 0
+                
+                cleanup_text = f"""
+✅ **Cleanup Complete**
+
+**Cleaned:**
+• Old messages: {cleaned_messages}
+• Old errors: {cleaned_errors}
+• Orphaned image hashes: {cleaned_hashes}
+
+**Result:** Database optimized and old data removed.
+                """
+                await update.message.reply_text(cleanup_text, parse_mode='Markdown')
+                
+            else:
+                # Show cleanup preview
+                cutoff_time = time.time() - (30 * 24 * 60 * 60)
+                error_cutoff = time.time() - (7 * 24 * 60 * 60)
+                
+                # Get counts without actually deleting
+                old_messages = await self.db_manager.count_old_messages(cutoff_time)
+                old_errors = await self.db_manager.count_old_errors(error_cutoff)
+                
+                preview_text = f"""
+🧹 **Cleanup Preview**
+
+**Will remove:**
+• Messages older than 30 days: {old_messages}
+• Errors older than 7 days: {old_errors}
+• Orphaned image hashes: (calculating...)
+
+Use `/cleanup --force` to proceed with cleanup.
+                """
+                await update.message.reply_text(preview_text, parse_mode='Markdown')
             
         except Exception as e:
             await update.message.reply_text(f"Error during cleanup: {e}")

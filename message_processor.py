@@ -294,60 +294,72 @@ class MessageProcessor:
     async def _send_message(self, bot: Bot, chat_id: int, content: str, 
                           media_info: Optional[Dict], reply_to_message_id: Optional[int] = None,
                           entities: List = None):
-        """Send message to destination chat"""
+        """Send message to destination chat with enhanced formatting support"""
         try:
+            # Convert entities for proper formatting and premium emoji support
+            converted_entities = self._convert_entities_for_telegram(entities) if entities else None
+            
             if media_info:
-                # Send media message
+                # Send media message with enhanced content handling
+                caption = content[:1024] if content else None
+                
                 if media_info['type'] == 'photo':
                     return await bot.send_photo(
                         chat_id=chat_id,
                         photo=media_info['data'],
-                        caption=content[:1024] if content else None,
-                        caption_entities=self._convert_entities_for_telegram(entities) if entities else None,
-                        reply_to_message_id=reply_to_message_id
+                        caption=caption,
+                        caption_entities=converted_entities,
+                        reply_to_message_id=reply_to_message_id,
+                        disable_web_page_preview=False,  # Allow webpage previews
+                        parse_mode=None  # Use entities instead
                     )
                 elif media_info['type'] == 'video':
                     return await bot.send_video(
                         chat_id=chat_id,
                         video=media_info['data'],
-                        caption=content[:1024] if content else None,
-                        caption_entities=self._convert_entities_for_telegram(entities) if entities else None,
-                        reply_to_message_id=reply_to_message_id
+                        caption=caption,
+                        caption_entities=converted_entities,
+                        reply_to_message_id=reply_to_message_id,
+                        parse_mode=None
                     )
                 elif media_info['type'] == 'document':
                     return await bot.send_document(
                         chat_id=chat_id,
                         document=media_info['data'],
                         filename=media_info.get('filename'),
-                        caption=content[:1024] if content else None,
-                        caption_entities=self._convert_entities_for_telegram(entities) if entities else None,
-                        reply_to_message_id=reply_to_message_id
+                        caption=caption,
+                        caption_entities=converted_entities,
+                        reply_to_message_id=reply_to_message_id,
+                        parse_mode=None
                     )
                 elif media_info['type'] == 'audio':
                     return await bot.send_audio(
                         chat_id=chat_id,
                         audio=media_info['data'],
-                        caption=content[:1024] if content else None,
-                        caption_entities=self._convert_entities_for_telegram(entities) if entities else None,
-                        reply_to_message_id=reply_to_message_id
+                        caption=caption,
+                        caption_entities=converted_entities,
+                        reply_to_message_id=reply_to_message_id,
+                        parse_mode=None
                     )
                 elif media_info['type'] == 'voice':
                     return await bot.send_voice(
                         chat_id=chat_id,
                         voice=media_info['data'],
-                        caption=content[:1024] if content else None,
-                        caption_entities=self._convert_entities_for_telegram(entities) if entities else None,
-                        reply_to_message_id=reply_to_message_id
+                        caption=caption,
+                        caption_entities=converted_entities,
+                        reply_to_message_id=reply_to_message_id,
+                        parse_mode=None
                     )
             else:
-                # Send text message
+                # Send text message with enhanced formatting support
                 if content:
                     return await bot.send_message(
                         chat_id=chat_id,
                         text=content,
-                        entities=self._convert_entities_for_telegram(entities) if entities else None,
-                        disable_web_page_preview=True,
-                        reply_to_message_id=reply_to_message_id
+                        entities=converted_entities,
+                        disable_web_page_preview=False,  # Allow webpage previews
+                        reply_to_message_id=reply_to_message_id,
+                        parse_mode=None  # Use entities for formatting
                     )
             
             return None

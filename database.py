@@ -507,6 +507,68 @@ class DatabaseManager:
             logger.error(f"Failed to get stats: {e}")
             return {}
 
+    async def cleanup_old_messages(self, cutoff_time: float) -> int:
+        """Clean up old message mappings"""
+        try:
+            cutoff_date = datetime.fromtimestamp(cutoff_time).isoformat()
+            async with self.get_connection() as conn:
+                cursor = await conn.execute(
+                    'DELETE FROM message_mapping WHERE created_at < ?',
+                    (cutoff_date,)
+                )
+                deleted_count = cursor.rowcount
+                await conn.commit()
+                logger.info(f"Cleaned up {deleted_count} old message mappings")
+                return deleted_count
+        except Exception as e:
+            logger.error(f"Failed to cleanup old messages: {e}")
+            return 0
+
+    async def cleanup_old_errors(self, cutoff_time: float) -> int:
+        """Clean up old error logs"""
+        try:
+            cutoff_date = datetime.fromtimestamp(cutoff_time).isoformat()
+            async with self.get_connection() as conn:
+                cursor = await conn.execute(
+                    'DELETE FROM error_logs WHERE created_at < ?',
+                    (cutoff_date,)
+                )
+                deleted_count = cursor.rowcount
+                await conn.commit()
+                logger.info(f"Cleaned up {deleted_count} old error logs")
+                return deleted_count
+        except Exception as e:
+            logger.error(f"Failed to cleanup old errors: {e}")
+            return 0
+
+    async def count_old_messages(self, cutoff_time: float) -> int:
+        """Count old message mappings for preview"""
+        try:
+            cutoff_date = datetime.fromtimestamp(cutoff_time).isoformat()
+            async with self.get_connection() as conn:
+                cursor = await conn.execute(
+                    'SELECT COUNT(*) FROM message_mapping WHERE created_at < ?',
+                    (cutoff_date,)
+                )
+                return (await cursor.fetchone())[0]
+        except Exception as e:
+            logger.error(f"Failed to count old messages: {e}")
+            return 0
+
+    async def count_old_errors(self, cutoff_time: float) -> int:
+        """Count old error logs for preview"""
+        try:
+            cutoff_date = datetime.fromtimestamp(cutoff_time).isoformat()
+            async with self.get_connection() as conn:
+                cursor = await conn.execute(
+                    'SELECT COUNT(*) FROM error_logs WHERE created_at < ?',
+                    (cutoff_date,)
+                )
+                return (await cursor.fetchone())[0]
+        except Exception as e:
+            logger.error(f"Failed to count old errors: {e}")
+            return 0
+
     async def close(self):
         """Close database connections"""
         try:

@@ -279,9 +279,31 @@ class ImageHandler:
                 await conn.commit()
                 
             logger.info(f"Cleaned up {deleted_count} unused image blocks older than {days} days")
+            return deleted_count
             
         except Exception as e:
             logger.error(f"Failed to cleanup image blocks: {e}")
+            return 0
+
+    async def cleanup_orphaned_hashes(self) -> int:
+        """Clean up orphaned image hashes that are no longer referenced"""
+        try:
+            async with self.db_manager.get_connection() as conn:
+                # Find hashes that are not referenced by any active pairs
+                cursor = await conn.execute('''
+                    DELETE FROM blocked_images 
+                    WHERE pair_id IS NOT NULL 
+                    AND pair_id NOT IN (SELECT id FROM pairs WHERE status = 'active')
+                ''')
+                orphaned_count = cursor.rowcount
+                await conn.commit()
+                
+                logger.info(f"Cleaned up {orphaned_count} orphaned image hashes")
+                return orphaned_count
+                
+        except Exception as e:
+            logger.error(f"Failed to cleanup orphaned hashes: {e}")
+            return 0
     
     async def get_image_stats(self) -> Dict[str, int]:
         """Get image blocking statistics"""
