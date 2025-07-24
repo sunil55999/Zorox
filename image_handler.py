@@ -155,6 +155,11 @@ class ImageHandler:
             
             # Download image
             buffer = BytesIO()
+            # Check if client is available
+            if not hasattr(event, 'client') or event.client is None:
+                logger.error("Event client is None, cannot download media")
+                return None
+            
             await event.client.download_media(event.media, file=buffer)
             buffer.seek(0)
             

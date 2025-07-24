@@ -300,6 +300,10 @@ class DatabaseManager:
             logger.error(f"Failed to get pair {pair_id}: {e}")
         return None
 
+    async def get_pair_by_id(self, pair_id: int) -> Optional[MessagePair]:
+        """Get pair by ID (alias for get_pair for compatibility)"""
+        return await self.get_pair(pair_id)
+
     async def get_all_pairs(self) -> List[MessagePair]:
         """Get all pairs"""
         pairs = []

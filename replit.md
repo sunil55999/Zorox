@@ -165,12 +165,13 @@ The system follows a modular, async-first architecture with clear separation of 
 
 ## Recent Changes
 
-### 2025-07-24: Bot Command and URL Forwarding Fixes
-- **URL Forwarding**: Confirmed working correctly - all messages send with `disable_web_page_preview=False` to enable URL previews
-- **Command Fixes**: Fixed null safety issues in bot command handlers, reducing LSP errors from 193 to 173
-- **Admin Function**: Enhanced `_is_admin()` with proper null checking for user safety
-- **Block Commands**: Fixed `/blockword`, `/unblockword`, and `/blockimage` commands with proper argument validation
-- **System Status**: Bot system running successfully with 1 pair loaded, all workers active
+### 2025-07-24: Critical Functionality Fixes - COMPLETED
+- **URL Forwarding**: Fixed and verified - all messages send with `disable_web_page_preview=False` to enable URL previews throughout the system
+- **Database Method Fix**: Added missing `get_pair_by_id()` method to DatabaseManager, resolving command failures
+- **Image Blocking Fix**: Enhanced null safety in image handler to prevent 'NoneType' download_media errors
+- **Command Safety**: Fixed null checking in `/blockword`, `/unblockword`, and `/blockimage` commands with proper user validation
+- **Comprehensive Testing**: All fixes verified through automated testing - database, image handler, URL forwarding, and bot commands all working
+- **System Status**: Bot system operational with 1 pair loaded, all workers active, commands functional
 
 ### 2025-07-24: Complete Advanced Filtering System Implementation
 - **Comprehensive filtering system**: Implemented phash-based image blocking with global/pair-specific scopes

@@ -1,0 +1,39 @@
+2025-07-24 12:54:29,258 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot7763869226:AAHEWmD_xF3weTiIpOMfphg9iFvWALm_FyM/getUpdates "HTTP/1.1 409 Conflict"
+2025-07-24 12:54:29,259 - telegram.ext.Updater - ERROR - Exception happened while polling for updates.
+Traceback (most recent call last):
+  File "/home/runner/workspace/.pythonlibs/lib/python3.11/site-packages/telegram/ext/_utils/networkloop.py", line 115, in network_retry_loop
+    if not await do_action():
+           ^^^^^^^^^^^^^^^^^
+  File "/home/runner/workspace/.pythonlibs/lib/python3.11/site-packages/telegram/ext/_utils/networkloop.py", line 108, in do_action
+    return action_cb_task.result()
+           ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/runner/workspace/.pythonlibs/lib/python3.11/site-packages/telegram/ext/_updater.py", line 340, in polling_action_cb
+    updates = await self.bot.get_updates(
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/runner/workspace/.pythonlibs/lib/python3.11/site-packages/telegram/ext/_extbot.py", line 670, in get_updates
+    updates = await super().get_updates(
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/runner/workspace/.pythonlibs/lib/python3.11/site-packages/telegram/_bot.py", line 4611, in get_updates
+    await self._post(
+  File "/home/runner/workspace/.pythonlibs/lib/python3.11/site-packages/telegram/_bot.py", line 698, in _post
+    return await self._do_post(
+           ^^^^^^^^^^^^^^^^^^^^
+  File "/home/runner/workspace/.pythonlibs/lib/python3.11/site-packages/telegram/ext/_extbot.py", line 370, in _do_post
+    return await super()._do_post(
+           ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/runner/workspace/.pythonlibs/lib/python3.11/site-packages/telegram/_bot.py", line 727, in _do_post
+    result = await request.post(
+             ^^^^^^^^^^^^^^^^^^^
+  File "/home/runner/workspace/.pythonlibs/lib/python3.11/site-packages/telegram/request/_baserequest.py", line 197, in post
+    result = await self._request_wrapper(
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/runner/workspace/.pythonlibs/lib/python3.11/site-packages/telegram/request/_baserequest.py", line 374, in _request_wrapper
+    raise exception
+telegram.error.Conflict: Conflict: terminated by other getUpdates request; make sure that only one bot instance is running
+2025-07-24 12:54:30,213 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot7626841974:AAEBhQ4Cia9aTUz7zEHheVKh9O0Fqu_7JqA/getMe "HTTP/1.1 200 OK"
+2025-07-24 12:54:30,214 - bot_manager - INFO - Metrics - Processed: 1, Success Rate: 1.00, Queue: 0
+2025-07-24 12:54:35,891 - telethon.client.updates - INFO - Got difference for account updates
+2025-07-24 12:54:35,904 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot7763869226:AAHEWmD_xF3weTiIpOMfphg9iFvWALm_FyM/getUpdates "HTTP/1.1 200 OK"
+2025-07-24 12:54:35,906 - image_handler - ERROR - Failed to compute image hash: 'NoneType' object has no attribute 'download_media'
+2025-07-24 12:54:36,649 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot7763869226:AAHEWmD_xF3weTiIpOMfphg9iFvWALm_FyM/sendMessage "HTTP/1.1 200 OK"
+2025-07-24 12:54:46,091 - httpx - INFO - HTTP Request: POST https://api.telegram.org/bot7763869226:AAHEWmD_xF3weTiIpOMfphg9iFvWALm_FyM/getUpdates "HTTP/1.1 200 OK"
