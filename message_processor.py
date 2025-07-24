@@ -837,45 +837,131 @@ class MessageProcessor:
             return "unknown"
     
     def _remove_mentions(self, text: str, placeholder: str) -> str:
-        """Remove mentions from text"""
-        # Remove @username mentions
-        text = re.sub(r'@\w+', placeholder, text)
-        
-        # Remove user links (tg://user?id=...)
-        text = re.sub(r'tg://user\?id=\d+', placeholder, text)
-        
-        return text
+        """Enhanced mention removal with comprehensive pattern matching"""
+        if not text:
+            return text
+        try:
+            original_text = text
+            
+            # Comprehensive mention patterns covering all edge cases
+            mention_patterns = [
+                # Mentions in parentheses like (@xyz) - handle before standard patterns
+                r'\(@[a-zA-Z0-9_]+\)',
+                # Mentions with dots like .@xyz
+                r'\.@[a-zA-Z0-9_]+',
+                # Standard @username patterns (letters, numbers, underscores)
+                r'@[a-zA-Z0-9_]+',
+                # User links with IDs
+                r'tg://user\?id=\d+',
+            ]
+            
+            # Apply each pattern with careful space cleanup
+            for pattern in mention_patterns:
+                text = re.sub(pattern, placeholder, text)
+            
+            # Clean up multiple spaces and formatting issues
+            text = re.sub(f'{re.escape(placeholder)}(\\s*{re.escape(placeholder)})+', placeholder, text)
+            text = re.sub(f'\\s+{re.escape(placeholder)}\\s+', f' {placeholder} ', text)
+            text = re.sub(f'^\\s*{re.escape(placeholder)}\\s*', f'{placeholder} ', text)
+            text = re.sub(f'\\s*{re.escape(placeholder)}\\s*$', f' {placeholder}', text)
+            text = re.sub(r'\s+', ' ', text).strip()
+            
+            # If result is empty or only placeholder, return original
+            if not text or text == placeholder:
+                return original_text
+            
+            return text
+            
+        except Exception as e:
+            logger.error(f"Error removing mentions: {e}")
+            return text
     
     def _remove_headers(self, text: str, patterns: List[str]) -> str:
-        """Remove headers based on patterns"""
+        """Enhanced header removal with exact text matching"""
+        if not text:
+            return text
+            
+        original_text = text
+        
+        # Conservative exact-match patterns if none provided
         if not patterns:
-            # Default header patterns
-            patterns = [
-                r'^.*?[:|：].*?\n',  # Lines ending with : or ：
-                r'^.*?➜.*?\n',      # Lines with arrow
-                r'^.*?👉.*?\n',     # Lines with pointing emoji
-                r'^.*?📢.*?\n'      # Lines with megaphone
+            exact_header_patterns = [
+                r'^🔥\s*VIP\s*ENTRY.*?$',      # Exact: "🔥 VIP ENTRY:"
+                r'^📢\s*SIGNAL\s*ALERT.*?$',   # Exact: "📢 SIGNAL ALERT"
+                r'^VIP\s*Channel.*?$',         # Exact: "VIP Channel:"
+                r'^📊\s*Analysis.*?$',         # Exact: "📊 Analysis"
+                r'^🚨\s*Alert.*?$',            # Exact: "🚨 Alert"
             ]
+            patterns = exact_header_patterns
         
-        for pattern in patterns:
-            text = re.sub(pattern, '', text, flags=re.MULTILINE)
+        # Process line by line for precise removal
+        lines = text.split('\n')
+        filtered_lines = []
         
-        return text.strip()
+        for line in lines:
+            line_removed = False
+            for pattern in patterns:
+                try:
+                    if re.match(pattern, line, re.IGNORECASE):
+                        line_removed = True
+                        logger.debug(f"Header removed: '{line}'")
+                        break
+                except re.error as e:
+                    logger.warning(f"Invalid header pattern '{pattern}': {e}")
+            
+            if not line_removed:
+                filtered_lines.append(line)
+        
+        result_text = '\n'.join(filtered_lines).strip()
+        
+        # Return original if result is empty
+        if not result_text or result_text.isspace():
+            return original_text
+        
+        return result_text
     
     def _remove_footers(self, text: str, patterns: List[str]) -> str:
-        """Remove footers based on patterns"""
+        """Enhanced footer removal with exact text matching"""
+        if not text:
+            return text
+            
+        original_text = text
+        
+        # Conservative exact-match patterns if none provided
         if not patterns:
-            # Default footer patterns
-            patterns = [
-                r'\n.*?@\w+.*?$',           # Lines with @mentions at end
-                r'\n.*?t\.me/.*?$',         # Lines with t.me links at end
-                r'\n.*?[📨📱💌].*?$',        # Lines with contact emojis at end
+            exact_footer_patterns = [
+                r'\n.*?🔚\s*END.*?$',          # Exact: "🔚 END"
+                r'\n.*?👉\s*Join.*?$',         # Exact: "👉 Join our VIP channel"
+                r'\n.*?Contact\s*@admin.*?$',  # Exact: "Contact @admin for more info"
+                r'\n.*?📱\s*Contact.*?$',      # Exact: "📱 Contact us"
+                r'\n.*?💌\s*Subscribe.*?$',    # Exact: "💌 Subscribe to"
             ]
+            patterns = exact_footer_patterns
         
-        for pattern in patterns:
-            text = re.sub(pattern, '', text, flags=re.MULTILINE)
+        # Process from bottom to top for clean footer removal
+        lines = text.split('\n')
+        filtered_lines = list(lines)
         
-        return text.strip()
+        for i in range(len(lines) - 1, -1, -1):
+            line = lines[i]
+            for pattern in patterns:
+                try:
+                    test_string = '\n' + line
+                    if re.search(pattern, test_string, re.IGNORECASE):
+                        if i < len(filtered_lines):
+                            filtered_lines.pop(i)
+                            logger.debug(f"Footer removed: '{line}'")
+                            break
+                except re.error as e:
+                    logger.warning(f"Invalid footer pattern '{pattern}': {e}")
+        
+        result_text = '\n'.join(filtered_lines).strip()
+        
+        # Return original if result is empty
+        if not result_text or result_text.isspace():
+            return original_text
+        
+        return result_text
     
     def _convert_entities_for_telegram(self, entities: List) -> List:
         """Convert Telethon entities to python-telegram-bot format with comprehensive validation"""

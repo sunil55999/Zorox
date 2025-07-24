@@ -737,56 +737,247 @@ class MessageFilter:
             return False
     
     def _remove_mentions(self, text: str, placeholder: str = "[User]") -> str:
-        """Remove mentions from text and replace with placeholder"""
+        """Enhanced mention removal with comprehensive pattern matching and clean formatting"""
         if not text:
             return text
         try:
-            # Remove @username mentions
-            text = re.sub(r'@\w+', placeholder, text)
+            original_text = text
             
-            # Remove user links (tg://user?id=...)
-            text = re.sub(r'tg://user\?id=\d+', placeholder, text)
+            # Comprehensive mention patterns covering all edge cases
+            mention_patterns = [
+                # Mentions in parentheses like (@xyz) - handle before standard patterns
+                r'\(@[a-zA-Z0-9_]+\)',
+                # Mentions with dots like .@xyz
+                r'\.@[a-zA-Z0-9_]+',
+                # Standard @username patterns (letters, numbers, underscores)
+                r'@[a-zA-Z0-9_]+',
+                # User links with IDs
+                r'tg://user\?id=\d+',
+            ]
             
-            return text.strip()
+            # Apply patterns strategically to handle edge cases
+            for pattern in mention_patterns:
+                if pattern == r'\(@[a-zA-Z0-9_]+\)':
+                    # Replace parentheses mentions, remove parentheses
+                    text = re.sub(pattern, placeholder, text)
+                elif pattern == r'\.@[a-zA-Z0-9_]+':
+                    # Replace dot mentions, remove dot
+                    text = re.sub(pattern, placeholder, text)
+                else:
+                    # Standard patterns
+                    text = re.sub(pattern, placeholder, text)
+            
+            # Clean up multiple spaces and formatting issues
+            # Remove duplicate placeholders
+            text = re.sub(f'{re.escape(placeholder)}(\\s*{re.escape(placeholder)})+', placeholder, text)
+            
+            # Clean up extra spaces around placeholders
+            text = re.sub(f'\\s+{re.escape(placeholder)}\\s+', f' {placeholder} ', text)
+            text = re.sub(f'^\\s*{re.escape(placeholder)}\\s*', f'{placeholder} ', text)
+            text = re.sub(f'\\s*{re.escape(placeholder)}\\s*$', f' {placeholder}', text)
+            
+            # Clean up multiple spaces
+            text = re.sub(r'\s+', ' ', text)
+            
+            # Remove leading/trailing spaces
+            text = text.strip()
+            
+            # If placeholder removal left empty text, return original
+            if not text or text == placeholder:
+                placeholder_only_pattern = f'^\\s*{re.escape(placeholder)}\\s*$'
+                if re.match(placeholder_only_pattern, text):
+                    return original_text
+            
+            return text
+            
         except Exception as e:
             logger.error(f"Error removing mentions: {e}")
             return text
     
     def _remove_headers(self, text: str, patterns: List[str]) -> str:
-        """Remove headers based on regex patterns"""
+        """Enhanced header removal with exact text matching and formatting preservation"""
         try:
+            if not text:
+                return text
+                
+            original_text = text
+            
+            # If no patterns provided, use conservative exact-match patterns
             if not patterns:
-                # Default header patterns if none specified
-                patterns = [
-                    r'^.*?[:|：].*?\n',  # Lines ending with : or ：
-                    r'^.*?➜.*?\n',      # Lines with arrow
-                    r'^.*?👉.*?\n',     # Lines with pointing emoji
-                    r'^.*?📢.*?\n'      # Lines with megaphone
+                # More conservative default patterns for exact header removal
+                exact_header_patterns = [
+                    r'^🔥\s*VIP\s*ENTRY.*?$',      # Exact: "🔥 VIP ENTRY:"
+                    r'^📢\s*SIGNAL\s*ALERT.*?$',   # Exact: "📢 SIGNAL ALERT"
+                    r'^VIP\s*Channel.*?$',         # Exact: "VIP Channel:"
+                    r'^📊\s*Analysis.*?$',         # Exact: "📊 Analysis"
+                    r'^🚨\s*Alert.*?$',            # Exact: "🚨 Alert"
                 ]
+                patterns = exact_header_patterns
             
-            for pattern in patterns:
-                text = re.sub(pattern, '', text, flags=re.MULTILINE)
+            # Apply patterns with line-by-line precision
+            lines = text.split('\n')
+            filtered_lines = []
             
-            return text.strip()
+            for line in lines:
+                line_removed = False
+                
+                # Check each pattern against the current line
+                for pattern in patterns:
+                    try:
+                        # Compile with case-insensitive matching for flexibility
+                        compiled_pattern = re.compile(pattern, re.IGNORECASE | re.MULTILINE)
+                        
+                        # Check if this line matches the header pattern
+                        if compiled_pattern.match(line):
+                            line_removed = True
+                            logger.debug(f"Header removed: '{line}' matched pattern: {pattern}")
+                            break
+                    except re.error as regex_error:
+                        logger.warning(f"Invalid header regex pattern '{pattern}': {regex_error}")
+                        continue
+                
+                # Only keep lines that don't match any header pattern
+                if not line_removed:
+                    filtered_lines.append(line)
+            
+            # Rejoin lines and clean up
+            result_text = '\n'.join(filtered_lines).strip()
+            
+            # If result is empty or only whitespace, return original
+            if not result_text or result_text.isspace():
+                return original_text
+            
+            return result_text
+            
         except Exception as e:
             logger.error(f"Error removing headers: {e}")
             return text
     
     def _remove_footers(self, text: str, patterns: List[str]) -> str:
-        """Remove footers based on regex patterns"""
+        """Enhanced footer removal with exact text matching and formatting preservation"""
         try:
+            if not text:
+                return text
+                
+            original_text = text
+            
+            # If no patterns provided, use conservative exact-match patterns
             if not patterns:
-                # Default footer patterns if none specified
-                patterns = [
-                    r'\n.*?@\w+.*?$',           # Lines with @mentions at end
-                    r'\n.*?t\.me/.*?$',         # Lines with t.me links at end
-                    r'\n.*?[📨📱💌].*?$',        # Lines with contact emojis at end
+                # More conservative default patterns for exact footer removal
+                exact_footer_patterns = [
+                    r'\n.*?🔚\s*END.*?$',          # Exact: "🔚 END"
+                    r'\n.*?👉\s*Join.*?$',         # Exact: "👉 Join our VIP channel"
+                    r'\n.*?Contact\s*@admin.*?$',  # Exact: "Contact @admin for more info"
+                    r'\n.*?📱\s*Contact.*?$',      # Exact: "📱 Contact us"
+                    r'\n.*?💌\s*Subscribe.*?$',    # Exact: "💌 Subscribe to"
                 ]
+                patterns = exact_footer_patterns
             
-            for pattern in patterns:
-                text = re.sub(pattern, '', text, flags=re.MULTILINE)
+            # Apply patterns working from the end backwards to preserve content
+            lines = text.split('\n')
+            filtered_lines = list(lines)  # Copy the lines
             
-            return text.strip()
+            # Process lines from bottom to top to remove footers cleanly
+            for i in range(len(lines) - 1, -1, -1):
+                line = lines[i]
+                line_removed = False
+                
+                # Check each pattern against the current line
+                for pattern in patterns:
+                    try:
+                        # Compile with case-insensitive matching for flexibility
+                        compiled_pattern = re.compile(pattern, re.IGNORECASE | re.MULTILINE)
+                        
+                        # Create a test string with newline prefix for footer patterns
+                        test_string = '\n' + line
+                        
+                        # Check if this line matches the footer pattern
+                        if compiled_pattern.search(test_string):
+                            # Remove this line from the filtered list
+                            if i < len(filtered_lines):
+                                filtered_lines.pop(i)
+                                line_removed = True
+                                logger.debug(f"Footer removed: '{line}' matched pattern: {pattern}")
+                                break
+                    except re.error as regex_error:
+                        logger.warning(f"Invalid footer regex pattern '{pattern}': {regex_error}")
+                        continue
+                
+                # If we removed a footer line, continue checking from this position
+                if line_removed:
+                    break
+            
+            # Rejoin lines and clean up
+            result_text = '\n'.join(filtered_lines).strip()
+            
+            # If result is empty or only whitespace, return original
+            if not result_text or result_text.isspace():
+                return original_text
+            
+            return result_text
+            
         except Exception as e:
             logger.error(f"Error removing footers: {e}")
             return text
+    
+    def _remove_mentions_with_entities(self, text: str, entities: List, placeholder: str = "[User]") -> tuple[str, List]:
+        """Remove mentions while preserving message entities and formatting"""
+        if not text:
+            return text, entities
+        
+        try:
+            # Use enhanced mention removal
+            filtered_text = self._remove_mentions(text, placeholder)
+            
+            # If text didn't change, return original entities
+            if filtered_text == text:
+                return text, entities
+            
+            # Calculate entity adjustments based on text changes
+            adjusted_entities = self._adjust_entities_after_text_transformation(
+                text, filtered_text, entities
+            )
+            
+            return filtered_text, adjusted_entities
+            
+        except Exception as e:
+            logger.error(f"Error removing mentions with entities: {e}")
+            return text, entities
+    
+    def _adjust_entities_after_text_transformation(self, original_text: str, new_text: str, entities: List) -> List:
+        """Adjust entity offsets after text transformation while preserving formatting"""
+        if not entities or original_text == new_text:
+            return entities
+        
+        try:
+            adjusted_entities = []
+            
+            for entity in entities:
+                if not hasattr(entity, 'offset') or not hasattr(entity, 'length'):
+                    continue
+                
+                entity_start = entity.offset
+                entity_end = entity.offset + entity.length
+                
+                # Ensure entity is within new text bounds
+                if entity_start < len(new_text):
+                    # Adjust length if entity extends beyond new text
+                    if entity_end > len(new_text):
+                        new_length = len(new_text) - entity_start
+                        if new_length > 0:
+                            # Create new entity with adjusted length
+                            adjusted_entity = type(entity)(
+                                type=entity.type,
+                                offset=entity.offset,
+                                length=new_length
+                            )
+                            adjusted_entities.append(adjusted_entity)
+                    else:
+                        # Entity fits within new text, keep as is
+                        adjusted_entities.append(entity)
+            
+            return adjusted_entities
+            
+        except Exception as e:
+            logger.error(f"Error adjusting entities after transformation: {e}")
+            return entities
