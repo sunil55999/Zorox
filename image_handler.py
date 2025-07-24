@@ -39,12 +39,23 @@ class ImageHandler:
             return False
         
         try:
-            # Only process photo messages
+            # Process photo messages and documents that are images
             if not hasattr(event, 'media') or not event.media:
                 return False
             
-            from telethon.tl.types import MessageMediaPhoto
-            if not isinstance(event.media, MessageMediaPhoto):
+            from telethon.tl.types import MessageMediaPhoto, MessageMediaDocument
+            
+            # Check if it's a photo or image document
+            is_image = False
+            if isinstance(event.media, MessageMediaPhoto):
+                is_image = True
+            elif isinstance(event.media, MessageMediaDocument):
+                document = getattr(event.media, 'document', None)
+                if document and hasattr(document, 'mime_type'):
+                    mime_type = getattr(document, 'mime_type', '').lower()
+                    is_image = mime_type.startswith('image/')
+            
+            if not is_image:
                 return False
             
             # Download and hash the image

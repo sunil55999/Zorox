@@ -52,7 +52,17 @@ class MessageProcessor:
         try:
             self.stats['messages_processed'] += 1
             
-            # Apply filters
+            # Check global word blocking first
+            message_text = event.text or event.raw_text or ""
+            if self.is_blocked_word(message_text):
+                logger.debug("Message blocked: contains global blocked words")
+                self.stats['messages_filtered'] += 1
+                pair.stats['messages_filtered'] = pair.stats.get('messages_filtered', 0) + 1
+                pair.stats['words_blocked'] = pair.stats.get('words_blocked', 0) + 1
+                await self.db_manager.update_pair(pair)
+                return True
+            
+            # Apply other filters
             filter_result = await self.message_filter.should_copy_message(event, pair)
             if not filter_result.should_copy:
                 logger.debug(f"Message filtered: {filter_result.reason}")
@@ -75,6 +85,15 @@ class MessageProcessor:
             # Handle media if present - download via Telethon and send via Bot API
             media_info = None
             if event.media:
+                # Check image blocking before processing
+                if await self.is_blocked_image(event, pair):
+                    logger.debug("Message blocked: contains blocked image")
+                    self.stats['messages_filtered'] += 1
+                    pair.stats['messages_filtered'] = pair.stats.get('messages_filtered', 0) + 1
+                    pair.stats['images_blocked'] = pair.stats.get('images_blocked', 0) + 1
+                    await self.db_manager.update_pair(pair)
+                    return True
+                
                 media_info = await self._download_and_prepare_media(event, pair, bot)
                 if media_info is False:  # Media blocked
                     self.stats['messages_filtered'] += 1
@@ -909,3 +928,39 @@ class MessageProcessor:
     def get_stats(self) -> Dict[str, int]:
         """Get processing statistics"""
         return self.stats.copy()
+    
+    def is_blocked_word(self, text: str) -> bool:
+        """
+        Global function to check if text contains blocked words
+        Returns True if the message should be blocked
+        """
+        if not text:
+            return False
+        
+        # Check against global blocked words from config
+        BLOCKED_WORDS = getattr(self.config, 'GLOBAL_BLOCKED_WORDS', [
+            "join", "promo", "subscribe", "contact", "spam", "advertisement", "click here"
+        ])
+        
+        text_lower = text.lower()
+        for word in BLOCKED_WORDS:
+            if word.lower() in text_lower:
+                logger.debug(f"Text blocked for word: {word}")
+                return True
+        
+        return False
+    
+    async def is_blocked_image(self, event, pair: MessagePair) -> bool:
+        """
+        Global function to check if image should be blocked using pHash
+        Returns True if the image should be blocked
+        """
+        if not event.media:
+            return False
+        
+        try:
+            # Use the existing image handler logic
+            return await self.image_handler.is_image_blocked(event, pair)
+        except Exception as e:
+            logger.error(f"Error checking image block: {e}")
+            return False

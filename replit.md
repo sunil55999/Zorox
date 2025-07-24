@@ -201,19 +201,20 @@ The system follows a modular, async-first architecture with clear separation of 
 - **Webpage preview enablement**: Removed disable_web_page_preview restrictions for proper link previews
 - **Entity bounds validation**: Added text length validation to prevent entity parsing errors
 
-### 2025-07-24: Complete Media Download and Webpage Preview Fix
-- **Replaced direct forwarding with media downloads**: Removed `event.forward_to()` and implemented proper media downloading via Telethon with Bot API sending for consistent bot sender appearance
-- **Enhanced media processing**: All media types (photos, videos, documents, stickers, animations, voice messages, video notes) are now downloaded to temporary files and sent via appropriate Bot API methods
-- **Enabled webpage previews**: Fixed messages with links to show webpage previews by setting `disable_web_page_preview=False` throughout the system
-- **Safe file handling**: Added proper temporary file management with automatic cleanup after media sending to prevent disk space issues
-- **Comprehensive media support**: Each media type uses its dedicated Bot API method (send_photo, send_video, send_document, etc.) with proper attributes preservation
-- **Fixed LSP diagnostics**: Resolved all type conflicts, document attribute access issues, and statistics handling problems
-- **Type safety improvements**: Updated MessagePair stats field from `Dict[str, int]` to `Dict[str, Any]` to support both numeric and string values like timestamps
+### 2025-07-24: Complete Filtering System Implementation and Fixes
+- **Fixed webpage previews**: Confirmed `disable_web_page_preview=False` is set throughout the system (5 instances) to enable proper link preview display
+- **Implemented global word blocking**: Added `is_blocked_word()` function with configurable `GLOBAL_BLOCKED_WORDS` list that blocks messages containing spam keywords like "join", "promo", "subscribe", "contact", etc.
+- **Enhanced image pHash blocking**: Confirmed `is_blocked_image()` function works with perceptual hash similarity comparison using imagehash library for duplicate image detection
+- **Integrated comprehensive filtering**: All three filters (webpage previews, word blocking, image blocking) are properly integrated into the `process_new_message()` flow
+- **Extended image support**: Enhanced image handler to process both MessageMediaPhoto and image documents (MIME type image/*)
+- **Global configuration**: Added `GLOBAL_BLOCKED_WORDS` configuration in config.py with environment variable support for easy customization
+- **Complete Bot API implementation**: All media sent via proper Bot API methods (send_photo, send_video, etc.) with bot sender appearance
+- **Statistics tracking**: Added tracking for blocked words (`words_blocked`) and blocked images (`images_blocked`) in pair statistics
 
 #### Technical Implementation Details:
-- Downloads media using `event.download_media(file=tempfile.mktemp())` for safe temporary file handling
-- Sends media with proper file handles using `with open(file_path, 'rb')` context managers
-- Automatically cleans up downloaded files after successful/failed sending operations
-- Preserves all media attributes (duration, width, height, filename) during Bot API sending
-- Maintains caption and caption_entities for media messages with text content
-- Uses bot appearance instead of user session forwarding for consistent sender identity
+- Word blocking: Case-insensitive partial matching against configurable global blocked words list
+- Image blocking: Uses PIL + imagehash for perceptual hash computation and Hamming distance comparison with configurable similarity threshold
+- Webpage previews: Set `disable_web_page_preview=False` in all send_message calls (text messages, media captions, and fallback scenarios)
+- Integration: All filters applied before media download and message sending to maximize efficiency
+- Media handling: Downloads via Telethon, sends via Bot API with automatic temporary file cleanup
+- Configuration: Environment variable `GLOBAL_BLOCKED_WORDS` for customizable spam word lists
