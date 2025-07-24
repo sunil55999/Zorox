@@ -179,7 +179,7 @@ class MessageProcessor:
                     message_id=mapping.destination_message_id,
                     text=processed_content,
                     entities=processed_entities,
-                    disable_web_page_preview=False  # Enable webpage previews in edits too
+                    disable_web_page_preview=False  # Always enable webpage previews
                 )
                 
                 # Update statistics
@@ -625,7 +625,7 @@ class MessageProcessor:
                         chat_id=chat_id,
                         text=content,
                         entities=converted_entities,
-                        disable_web_page_preview=not enable_webpage_preview,  # Use parameter for webpage previews
+                        disable_web_page_preview=False,  # Always enable webpage previews for URLs
                         reply_to_message_id=reply_to_message_id
                     )
             
@@ -660,12 +660,12 @@ class MessageProcessor:
                     elif media_type == 'sticker':
                         return await bot.send_sticker(chat_id=chat_id, sticker=media_info['data'], reply_to_message_id=reply_to_message_id)
                 else:
-                    # Final fallback: plain text without entities, preserve URL preview setting
+                    # Final fallback: plain text without entities, enable URL previews
                     return await bot.send_message(
                         chat_id=chat_id, 
                         text=content, 
                         reply_to_message_id=reply_to_message_id, 
-                        disable_web_page_preview=not enable_webpage_preview
+                        disable_web_page_preview=False
                     )
             except Exception as fallback_error:
                 logger.error(f"All fallback attempts failed: {fallback_error}")
