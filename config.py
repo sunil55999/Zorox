@@ -106,7 +106,7 @@ class Config:
         if not self.BOT_TOKENS:
             errors.append("At least one bot token is required")
         if not self.ADMIN_BOT_TOKEN:
-            errors.append("ADMIN_BOT_TOKEN is required for system management")
+            logger.warning("ADMIN_BOT_TOKEN not set - admin commands will not be available")
         
         # Validate numeric ranges
         if self.MAX_WORKERS < 1 or self.MAX_WORKERS > 50:

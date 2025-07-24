@@ -87,7 +87,13 @@ class BotManager:
         # Bot instances
         self.telegram_bots: List[Bot] = []
         self.bot_applications: List[Application] = []
+        self.admin_bot: Optional[Bot] = None
+        self.admin_application: Optional[Application] = None
         self.telethon_client: Optional[TelegramClient] = None
+        
+        # Initialize filter and image handler from message processor
+        self.message_filter = self.message_processor.message_filter
+        self.image_handler = self.message_processor.image_handler
         
         # Monitoring and metrics
         self.bot_metrics: Dict[int, BotMetrics] = {}
@@ -132,35 +138,52 @@ class BotManager:
     
     async def _init_telegram_bots(self):
         """Initialize Telegram bot instances"""
-        for i, token in enumerate(self.config.BOT_TOKENS):
-            try:
-                bot = Bot(token=token)
+        try:
+            # Initialize admin bot first if configured
+            if self.config.ADMIN_BOT_TOKEN:
+                self.admin_bot = Bot(token=self.config.ADMIN_BOT_TOKEN)
+                me = await self.admin_bot.get_me()
+                logger.info(f"Admin bot initialized: @{me.username}")
                 
-                # Test bot connectivity
-                bot_info = await bot.get_me()
-                logger.info(f"Bot {i} initialized: @{bot_info.username}")
-                
-                self.telegram_bots.append(bot)
-                
-                # Create application for command handling
-                app = Application.builder().token(token).build()
-                
-                # Add command handlers only to primary bot
-                if i == 0:
-                    await self._setup_command_handlers(app)
-                
-                self.bot_applications.append(app)
-                
-            except Exception as e:
-                logger.error(f"Failed to initialize bot {i}: {e}")
-                # Continue with other bots
+                # Create admin application for commands
+                self.admin_application = Application.builder().token(self.config.ADMIN_BOT_TOKEN).build()
+                await self._setup_command_handlers(self.admin_application)
+                logger.info("Admin bot command handlers configured")
+            
+            # Initialize message sending bots
+            for i, token in enumerate(self.config.BOT_TOKENS):
+                try:
+                    bot = Bot(token=token)
+                    
+                    # Test bot connectivity
+                    bot_info = await bot.get_me()
+                    logger.info(f"Bot {i} initialized: @{bot_info.username}")
+                    
+                    self.telegram_bots.append(bot)
+                    
+                    # Create application for message sending (no commands on these)
+                    app = Application.builder().token(token).build()
+                    self.bot_applications.append(app)
+                    
+                except Exception as e:
+                    logger.error(f"Failed to initialize bot {i}: {e}")
+                    # Continue with other bots
+        except Exception as e:
+            logger.error(f"Failed to initialize bots: {e}")
+            raise
     
     async def _init_telethon_client(self):
         """Initialize Telethon client for message listening"""
         try:
+            # Validate required configuration
+            if not self.config.API_ID or not self.config.API_HASH or not self.config.PHONE_NUMBER:
+                raise ValueError("Missing required Telethon configuration: API_ID, API_HASH, or PHONE_NUMBER")
+            
+            api_id = int(self.config.API_ID) if isinstance(self.config.API_ID, str) else self.config.API_ID
+            
             self.telethon_client = TelegramClient(
                 'session_bot',
-                self.config.API_ID,
+                api_id,
                 self.config.API_HASH
             )
             
@@ -267,17 +290,23 @@ class BotManager:
         try:
             self.running = True
             
-            # Start Telegram bot applications
+            # Start admin bot application if available
+            if self.admin_application:
+                await self.admin_application.initialize()
+                await self.admin_application.start()
+                logger.info("Started admin bot application")
+            
+            # Start message sending bot applications
             for i, app in enumerate(self.bot_applications):
-                if i == 0:  # Only start primary bot for commands
-                    await app.initialize()
-                    await app.start()
-                    logger.info(f"Started bot application {i}")
+                await app.initialize()
+                await app.start()
+                logger.info(f"Started bot application {i}")
             
             # Start worker tasks
             for i in range(self.config.MAX_WORKERS):
                 task = asyncio.create_task(self._message_worker(i))
                 self.worker_tasks.append(task)
+                logger.info(f"Message worker {i} started")
             
             # Start monitoring tasks
             monitoring_tasks = [
@@ -305,6 +334,11 @@ class BotManager:
             # Wait for tasks to complete
             if self.worker_tasks:
                 await asyncio.gather(*self.worker_tasks, return_exceptions=True)
+            
+            # Stop admin bot application
+            if self.admin_application and self.admin_application.running:
+                await self.admin_application.stop()
+                await self.admin_application.shutdown()
             
             # Stop bot applications
             for app in self.bot_applications:
@@ -465,7 +499,7 @@ class BotManager:
                 
                 # Check if system is paused
                 paused = await self.db_manager.get_setting("system_paused", "false")
-                if paused.lower() == "true":
+                if paused and paused.lower() == "true":
                     # Put message back in queue
                     await self.message_queue.put(queued_msg)
                     await asyncio.sleep(5)
@@ -550,7 +584,7 @@ class BotManager:
             logger.warning(f"Rate limited by Telegram: {e.retry_after} seconds")
             bot_metrics = self.bot_metrics.get(queued_msg.bot_index)
             if bot_metrics:
-                bot_metrics.rate_limit_until = time.time() + e.retry_after
+                bot_metrics.rate_limit_until = time.time() + float(e.retry_after)
             return False
             
         except (NetworkError, TimedOut) as e:
@@ -559,12 +593,12 @@ class BotManager:
             
         except TelegramError as e:
             logger.error(f"Telegram error: {e}")
-            await self._log_error("telegram_error", str(e), None, queued_msg.bot_index)
+            await self._log_error("telegram_error", str(e), None, queued_msg.pair_id, queued_msg.bot_index)
             return False
             
         except Exception as e:
             logger.error(f"Error processing message: {e}")
-            await self._log_error("processing_error", str(e), queued_msg.pair_id, queued_msg.bot_index)
+            await self._log_error("processing_error", str(e), traceback.format_exc(), queued_msg.pair_id, queued_msg.bot_index)
             return False
     
     def _check_rate_limit(self, bot_index: int) -> bool:
@@ -671,7 +705,7 @@ class BotManager:
     # Command handlers
     async def _cmd_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Start command handler"""
-        if not self._is_admin(update.effective_user.id):
+        if not update.effective_user or not self._is_admin(update.effective_user.id):
             return
         
         await update.message.reply_text(
@@ -687,7 +721,7 @@ class BotManager:
     
     async def _cmd_help(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Help command handler"""
-        if not self._is_admin(update.effective_user.id):
+        if not update.effective_user or not self._is_admin(update.effective_user.id):
             return
         
         help_text = """
@@ -744,7 +778,7 @@ class BotManager:
     
     async def _cmd_status(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Status command handler"""
-        if not self._is_admin(update.effective_user.id):
+        if not update.effective_user or not self._is_admin(update.effective_user.id):
             return
         
         try:
@@ -869,7 +903,7 @@ class BotManager:
     
     async def _cmd_add_pair(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Add pair command handler"""
-        if not self._is_admin(update.effective_user.id):
+        if not update.effective_user or not self._is_admin(update.effective_user.id):
             return
         
         try:
@@ -898,7 +932,7 @@ class BotManager:
     
     async def _cmd_delete_pair(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Delete pair command handler"""
-        if not self._is_admin(update.effective_user.id):
+        if not update.effective_user or not self._is_admin(update.effective_user.id):
             return
         
         try:
@@ -932,7 +966,7 @@ class BotManager:
     # Enhanced command handlers
     async def _cmd_health(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Health monitoring command"""
-        if not self._is_admin(update.effective_user.id):
+        if not update.effective_user or not self._is_admin(update.effective_user.id):
             return
         
         try:
@@ -1723,7 +1757,7 @@ class BotManager:
             pair = self.pairs[pair_id]
             
             # Apply text filtering
-            filtered_text, entities = await self.message_filter.filter_text(test_text, pair, [])
+            filtered_text = await self.message_filter.filter_text(test_text, pair)
             
             result_text = f"🧪 **Filter Test Results for Pair {pair_id}:**\n\n"
             result_text += f"**Original:** {test_text}\n\n"
@@ -1754,7 +1788,11 @@ class BotManager:
     
     def _is_admin(self, user_id: int) -> bool:
         """Check if user is admin"""
-        return user_id in self.config.ADMIN_USER_IDS if self.config.ADMIN_USER_IDS else True
+        # If no admin users configured, allow all users for initial setup
+        if not self.config.ADMIN_USER_IDS:
+            logger.warning(f"No admin users configured, allowing user {user_id} for setup")
+            return True
+        return user_id in self.config.ADMIN_USER_IDS
     
     def _get_uptime(self) -> str:
         """Get system uptime"""
