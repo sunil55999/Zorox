@@ -165,6 +165,18 @@ The system follows a modular, async-first architecture with clear separation of 
 
 ## Recent Changes
 
+### 2025-07-25: COMMAND UPDATE ISSUE RESOLVED - CRITICAL FIX COMPLETED ✅
+- ✅ **Fixed Critical Command Update Bug**: Resolved issue where commands successfully updated database but changes weren't applied in message processing
+  - **Root Cause**: Commands were updating database correctly but cached pairs in memory weren't being reloaded
+  - **Solution**: Added `await self._load_pairs()` after all database update operations in command handlers
+  - **Commands Fixed**: `/mentions`, `/headerregex`, `/footerregex`, `/blockword`, `/unblockword` now immediately reload pairs after updates
+  - **Impact**: All filter settings now take effect immediately after command execution instead of requiring system restart
+  - **Testing**: Verified mention removal setting updates are now properly reflected in message processing
+- ✅ **Enhanced Command Reliability**: All pair configuration commands now guarantee immediate effect
+  - Commands update database AND reload pairs in memory for instant application
+  - No more stale cached configuration causing filter settings to be ignored
+  - System maintains consistency between database state and runtime behavior
+
 ### 2025-07-25: CRITICAL BOT TOKEN BUG FIX COMPLETED ✅
 - ✅ **Fixed Bot Token Assignment Bug**: Resolved critical issue where pairs created with saved bot tokens were using default .env tokens instead
   - **Root Cause**: The `_process_queued_message` method was only using `pair.assigned_bot_index` to select bots from config's `BOT_TOKENS` list

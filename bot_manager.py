@@ -1695,6 +1695,8 @@ Use `/cleanup --force` to proceed with cleanup.
                 pair_id = int(context.args[1])
                 success = await self.message_filter.add_pair_word_block(pair_id, word)
                 if success:
+                    # Reload pairs to get the updated configuration
+                    await self._load_pairs()
                     await update.message.reply_text(f"✅ Blocked word '{word}' for pair {pair_id}")
                 else:
                     await update.message.reply_text(f"❌ Failed to block word for pair {pair_id}")
@@ -1728,6 +1730,8 @@ Use `/cleanup --force` to proceed with cleanup.
                 pair_id = int(context.args[1])
                 success = await self.message_filter.remove_pair_word_block(pair_id, word)
                 if success:
+                    # Reload pairs to get the updated configuration
+                    await self._load_pairs()
                     await update.message.reply_text(f"✅ Unblocked word '{word}' for pair {pair_id}")
                 else:
                     await update.message.reply_text(f"❌ Failed to unblock word for pair {pair_id}")
@@ -1972,6 +1976,9 @@ Use `/cleanup --force` to proceed with cleanup.
             success = await self.message_filter.set_mention_removal(pair_id, remove_mentions, placeholder)
             
             if success:
+                # Reload pairs to get the updated configuration
+                await self._load_pairs()
+                
                 if remove_mentions:
                     placeholder_text = f" with placeholder '{placeholder}'" if placeholder else " (complete removal)"
                     await update.message.reply_text(f"✅ Mention removal enabled for pair {pair_id}{placeholder_text}")
@@ -2008,6 +2015,9 @@ Use `/cleanup --force` to proceed with cleanup.
             success = await self.message_filter.set_pair_header_footer_regex(pair_id, header_regex=pattern)
             
             if success:
+                # Reload pairs to get the updated configuration
+                await self._load_pairs()
+                
                 if pattern:
                     await update.message.reply_text(f"✅ Header regex set for pair {pair_id}: `{pattern}`")
                 else:
@@ -2043,6 +2053,9 @@ Use `/cleanup --force` to proceed with cleanup.
             success = await self.message_filter.set_pair_header_footer_regex(pair_id, footer_regex=pattern)
             
             if success:
+                # Reload pairs to get the updated configuration
+                await self._load_pairs()
+                
                 if pattern:
                     await update.message.reply_text(f"✅ Footer regex set for pair {pair_id}: `{pattern}`")
                 else:
