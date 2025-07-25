@@ -1728,21 +1728,72 @@ Use `/cleanup --force` to proceed with cleanup.
             if context.args and len(context.args) > 1:
                 # Unblock for specific pair
                 pair_id = int(context.args[1])
+                
+                # Check if pair exists
+                if pair_id not in self.pairs:
+                    await update.message.reply_text(f"❌ Pair {pair_id} not found")
+                    return
+                
+                # Get current blocked words before removal
+                pair = self.pairs[pair_id]
+                current_blocked = pair.filters.get("blocked_words", [])
+                
+                if word not in current_blocked:
+                    await update.message.reply_text(f"ℹ️ Word '{word}' is not blocked for pair {pair_id}")
+                    return
+                
+                logger.info(f"Attempting to unblock word '{word}' for pair {pair_id}")
                 success = await self.message_filter.remove_pair_word_block(pair_id, word)
+                
                 if success:
                     # Reload pairs to get the updated configuration
                     await self._load_pairs()
-                    await update.message.reply_text(f"✅ Unblocked word '{word}' for pair {pair_id}")
+                    
+                    # Verify the word was actually removed
+                    updated_pair = self.pairs.get(pair_id)
+                    if updated_pair:
+                        updated_blocked = updated_pair.filters.get("blocked_words", [])
+                        if word not in updated_blocked:
+                            logger.info(f"Successfully unblocked word '{word}' for pair {pair_id}")
+                            await update.message.reply_text(
+                                f"✅ Unblocked word '{word}' for pair {pair_id}\n"
+                                f"📋 Current blocked words: {updated_blocked if updated_blocked else 'None'}"
+                            )
+                        else:
+                            logger.error(f"Word '{word}' still present after unblock operation for pair {pair_id}")
+                            await update.message.reply_text(f"❌ Failed to unblock word '{word}' - word still present after operation")
+                    else:
+                        await update.message.reply_text(f"❌ Failed to reload pair {pair_id} after unblock")
                 else:
-                    await update.message.reply_text(f"❌ Failed to unblock word for pair {pair_id}")
+                    logger.error(f"Failed to unblock word '{word}' for pair {pair_id}")
+                    await update.message.reply_text(f"❌ Failed to unblock word '{word}' for pair {pair_id}")
             else:
                 # Unblock globally
+                current_global = self.message_filter.global_blocks.get("words", [])
+                
+                if word not in current_global:
+                    await update.message.reply_text(f"ℹ️ Word '{word}' is not globally blocked")
+                    return
+                
+                logger.info(f"Attempting to unblock global word '{word}'")
                 await self.message_filter.remove_global_word_block(word)
-                await update.message.reply_text(f"✅ Globally unblocked word '{word}'")
+                
+                # Verify removal
+                updated_global = self.message_filter.global_blocks.get("words", [])
+                if word not in updated_global:
+                    logger.info(f"Successfully unblocked global word '{word}'")
+                    await update.message.reply_text(
+                        f"✅ Globally unblocked word '{word}'\n"
+                        f"📋 Current global blocks: {updated_global if updated_global else 'None'}"
+                    )
+                else:
+                    logger.error(f"Global word '{word}' still present after unblock operation")
+                    await update.message.reply_text(f"❌ Failed to unblock global word '{word}' - word still present after operation")
                 
         except ValueError:
             await update.message.reply_text("Invalid pair ID.")
         except Exception as e:
+            logger.error(f"Error in unblock word command: {e}")
             await update.message.reply_text(f"Error unblocking word: {e}")
     
     async def _cmd_list_blocked_words(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
