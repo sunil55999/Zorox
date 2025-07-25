@@ -77,10 +77,10 @@ class Config:
         
     def _parse_blocked_words(self) -> List[str]:
         """Parse global blocked words from environment"""
-        blocked_words_str = os.getenv('GLOBAL_BLOCKED_WORDS', 'join,promo,subscribe,contact,spam,advertisement,click here,telegram,dm me,private message')
+        blocked_words_str = os.getenv('GLOBAL_BLOCKED_WORDS', 'promo,subscribe,contact,spam,advertisement,click here,telegram,dm me,private message')
         if blocked_words_str:
             return [word.strip().lower() for word in blocked_words_str.split(',') if word.strip()]
-        return ['join', 'promo', 'subscribe', 'contact', 'spam', 'advertisement', 'click here']
+        return ['promo', 'subscribe', 'contact', 'spam', 'advertisement', 'click here']
         
     def _get_bot_tokens(self) -> List[str]:
         """Extract and validate bot tokens"""
