@@ -106,7 +106,7 @@ class MessageProcessor:
             contains_urls = bool(processed_content and self._contains_urls(processed_content))
             if contains_urls:
                 logger.info(f"Message contains URLs, will enable webpage preview: {processed_content[:200]}...")
-            elif processed_content and self._contains_simple_urls(processed_content):
+            elif processed_content and self._contains_simple_urls(processed_content or ""):
                 contains_urls = True
                 logger.info(f"Message contains simple URLs, will enable webpage preview: {processed_content[:200]}...")
             
@@ -1112,7 +1112,7 @@ class MessageProcessor:
         """Get processing statistics"""
         return self.stats.copy()
     
-    def is_blocked_word(self, text: str, pair: MessagePair = None) -> bool:
+    def is_blocked_word(self, text: str, pair: Optional[MessagePair] = None) -> bool:
         """
         Check if text contains blocked words (global or pair-specific)
         Returns True if the message should be blocked
@@ -1167,7 +1167,7 @@ class MessageProcessor:
         mention_pattern = r'@\w+'
         return re.sub(mention_pattern, placeholder, text)
     
-    def _remove_header_footer(self, text: str, header_pattern: str = None, footer_pattern: str = None) -> str:
+    def _remove_header_footer(self, text: str, header_pattern: Optional[str] = None, footer_pattern: Optional[str] = None) -> str:
         """Remove header and footer from text using regex patterns"""
         if not text:
             return text

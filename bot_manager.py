@@ -229,7 +229,8 @@ class BotManager:
                 self.config.API_HASH
             )
             
-            await self.telethon_client.start(phone=self.config.PHONE_NUMBER)
+            if self.telethon_client and not self.telethon_client.is_connected():
+                await self.telethon_client.start(phone=self.config.PHONE_NUMBER)
             logger.info("Telethon client initialized")
             
             # Setup message handlers
@@ -649,7 +650,7 @@ class BotManager:
             logger.warning(f"Rate limited by Telegram: {e.retry_after} seconds")
             bot_metrics = self.bot_metrics.get(queued_msg.bot_index)
             if bot_metrics:
-                bot_metrics.rate_limit_until = time.time() + float(e.retry_after)
+                bot_metrics.rate_limit_until = time.time() + float(getattr(e, 'retry_after', 60))
             return False
             
         except (NetworkError, TimedOut) as e:
@@ -2042,6 +2043,16 @@ Use `/cleanup --force` to proceed with cleanup.
             return True
             
         return user_id in self.config.ADMIN_USER_IDS
+    
+    async def _safe_reply(self, update: Update, text: str, parse_mode: str = None) -> bool:
+        """Safely reply to a message, returning True if successful"""
+        try:
+            if update and update.message:
+                await update.message.reply_text(text, parse_mode=parse_mode)
+                return True
+        except Exception as e:
+            logger.error(f"Failed to send reply: {e}")
+        return False
     
     def _get_uptime(self) -> str:
         """Get system uptime"""

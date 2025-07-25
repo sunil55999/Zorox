@@ -262,15 +262,17 @@ class DatabaseManager:
     @asynccontextmanager
     async def get_connection(self):
         """Get database connection from pool"""
+        conn = None
         try:
             conn = await aiosqlite.connect(self.db_path)
             await conn.execute("PRAGMA foreign_keys = ON")
             yield conn
         finally:
-            await conn.close()
+            if conn:
+                await conn.close()
     
     async def create_pair(self, source_chat_id: int, destination_chat_id: int,
-                         name: str, bot_index: int = 0, bot_token_id: int = None) -> int:
+                         name: str, bot_index: int = 0, bot_token_id: Optional[int] = None) -> int:
         """Create new message pair"""
         try:
             async with self.get_connection() as conn:
@@ -286,7 +288,7 @@ class DatabaseManager:
                 await conn.commit()
                 
                 logger.info(f"Created pair {pair_id}: {name} ({source_chat_id} -> {destination_chat_id})")
-                return pair_id
+                return pair_id or 0
                 
         except sqlite3.IntegrityError:
             raise ValueError(f"Pair already exists: {source_chat_id} -> {destination_chat_id}")
@@ -298,10 +300,24 @@ class DatabaseManager:
         """Get pair by ID"""
         try:
             async with self.get_connection() as conn:
-                cursor = await conn.execute('SELECT * FROM pairs WHERE id = ?', (pair_id,))
+                cursor = await conn.execute('''
+                    SELECT id, source_chat_id, destination_chat_id, name, status, 
+                           assigned_bot_index, bot_token_id, filters, stats, created_at
+                    FROM pairs WHERE id = ?
+                ''', (pair_id,))
                 row = await cursor.fetchone()
                 
                 if row:
+                    try:
+                        filters_data = json.loads(row[7]) if row[7] else {}
+                    except json.JSONDecodeError:
+                        filters_data = {}
+                    
+                    try:
+                        stats_data = json.loads(row[8]) if row[8] else {}
+                    except json.JSONDecodeError:
+                        stats_data = {}
+                    
                     return MessagePair(
                         id=row[0],
                         source_chat_id=row[1],
@@ -310,8 +326,8 @@ class DatabaseManager:
                         status=row[4],
                         assigned_bot_index=row[5],
                         bot_token_id=row[6],
-                        filters=json.loads(row[7]) if row[7] else {},
-                        stats=json.loads(row[8]) if row[8] else {},
+                        filters=filters_data,
+                        stats=stats_data,
                         created_at=row[9]
                     )
         except Exception as e:
@@ -327,22 +343,51 @@ class DatabaseManager:
         pairs = []
         try:
             async with self.get_connection() as conn:
-                cursor = await conn.execute('SELECT * FROM pairs ORDER BY id')
+                # Use explicit column selection to ensure correct order
+                cursor = await conn.execute('''
+                    SELECT id, source_chat_id, destination_chat_id, name, status, 
+                           assigned_bot_index, bot_token_id, filters, stats, created_at
+                    FROM pairs ORDER BY id
+                ''')
                 async for row in cursor:
-                    pairs.append(MessagePair(
-                        id=row[0],
-                        source_chat_id=row[1],
-                        destination_chat_id=row[2],
-                        name=row[3],
-                        status=row[4],
-                        assigned_bot_index=row[5],
-                        bot_token_id=row[6],
-                        filters=json.loads(row[7]) if row[7] else {},
-                        stats=json.loads(row[8]) if row[8] else {},
-                        created_at=row[9]
-                    ))
+                    try:
+                        # Safely parse JSON fields with better error handling
+                        filters_data = {}
+                        if row[7]:
+                            try:
+                                filters_data = json.loads(row[7])
+                            except json.JSONDecodeError as je:
+                                logger.warning(f"Failed to parse filters for pair {row[0]}: {je}")
+                                filters_data = {}
+                        
+                        stats_data = {}
+                        if row[8]:
+                            try:
+                                stats_data = json.loads(row[8])
+                            except json.JSONDecodeError as je:
+                                logger.warning(f"Failed to parse stats for pair {row[0]}: {je}")
+                                stats_data = {}
+                        
+                        pairs.append(MessagePair(
+                            id=row[0],
+                            source_chat_id=row[1],
+                            destination_chat_id=row[2],
+                            name=row[3],
+                            status=row[4],
+                            assigned_bot_index=row[5],
+                            bot_token_id=row[6],
+                            filters=filters_data,
+                            stats=stats_data,
+                            created_at=row[9]
+                        ))
+                    except Exception as pair_error:
+                        logger.error(f"Failed to process pair row {row[0] if row else 'unknown'}: {pair_error}")
+                        continue
+                        
         except Exception as e:
             logger.error(f"Failed to get pairs: {e}")
+            import traceback
+            logger.error(f"Traceback: {traceback.format_exc()}")
         return pairs
 
     async def update_pair(self, pair: MessagePair):
@@ -429,16 +474,16 @@ class DatabaseManager:
         except Exception as e:
             logger.error(f"Failed to log error: {e}")
 
-    async def get_setting(self, key: str, default: str = None) -> Optional[str]:
+    async def get_setting(self, key: str, default: str = None) -> str:
         """Get system setting"""
         try:
             async with self.get_connection() as conn:
                 cursor = await conn.execute('SELECT value FROM settings WHERE key = ?', (key,))
                 row = await cursor.fetchone()
-                return row[0] if row else default
+                return row[0] if row else (default or "")
         except Exception as e:
             logger.error(f"Failed to get setting {key}: {e}")
-            return default
+            return default or ""
 
     async def set_setting(self, key: str, value: str):
         """Set system setting"""
@@ -498,14 +543,17 @@ class DatabaseManager:
                 
                 # Pair counts
                 cursor = await conn.execute('SELECT COUNT(*) FROM pairs')
-                stats['total_pairs'] = (await cursor.fetchone())[0]
+                row = await cursor.fetchone()
+                stats['total_pairs'] = row[0] if row else 0
                 
                 cursor = await conn.execute('SELECT COUNT(*) FROM pairs WHERE status = "active"')
-                stats['active_pairs'] = (await cursor.fetchone())[0]
+                row = await cursor.fetchone()
+                stats['active_pairs'] = row[0] if row else 0
                 
                 # Message counts
                 cursor = await conn.execute('SELECT COUNT(*) FROM message_mapping')
-                stats['total_messages'] = (await cursor.fetchone())[0]
+                row = await cursor.fetchone()
+                stats['total_messages'] = row[0] if row else 0
                 
                 # Recent activity (last 24 hours)
                 yesterday = (datetime.now() - timedelta(days=1)).isoformat()
@@ -513,15 +561,18 @@ class DatabaseManager:
                     'SELECT COUNT(*) FROM message_mapping WHERE created_at > ?',
                     (yesterday,)
                 )
-                stats['messages_24h'] = (await cursor.fetchone())[0]
+                row = await cursor.fetchone()
+                stats['messages_24h'] = row[0] if row else 0
                 
                 # Error counts
                 cursor = await conn.execute('SELECT COUNT(*) FROM error_logs WHERE created_at > ?', (yesterday,))
-                stats['errors_24h'] = (await cursor.fetchone())[0]
+                row = await cursor.fetchone()
+                stats['errors_24h'] = row[0] if row else 0
                 
                 # Database size
                 cursor = await conn.execute("SELECT page_count * page_size as size FROM pragma_page_count(), pragma_page_size()")
-                db_size = (await cursor.fetchone())[0]
+                row = await cursor.fetchone()
+                db_size = row[0] if row else 0
                 stats['database_size_mb'] = round(db_size / (1024 * 1024), 2)
                 
                 return stats
@@ -573,7 +624,8 @@ class DatabaseManager:
                     'SELECT COUNT(*) FROM message_mapping WHERE created_at < ?',
                     (cutoff_date,)
                 )
-                return (await cursor.fetchone())[0]
+                row = await cursor.fetchone()
+                return row[0] if row else 0
         except Exception as e:
             logger.error(f"Failed to count old messages: {e}")
             return 0
@@ -587,13 +639,14 @@ class DatabaseManager:
                     'SELECT COUNT(*) FROM error_logs WHERE created_at < ?',
                     (cutoff_date,)
                 )
-                return (await cursor.fetchone())[0]
+                row = await cursor.fetchone()
+                return row[0] if row else 0
         except Exception as e:
             logger.error(f"Failed to count old errors: {e}")
             return 0
 
     # Bot Token Management Methods
-    async def save_bot_token(self, name: str, token: str, username: str = None) -> int:
+    async def save_bot_token(self, name: str, token: str, username: Optional[str] = None) -> int:
         """Save a bot token to database"""
         try:
             async with self.get_connection() as conn:
@@ -604,7 +657,7 @@ class DatabaseManager:
                 token_id = cursor.lastrowid
                 await conn.commit()
                 logger.info(f"Saved bot token: {name} ({username})")
-                return token_id
+                return token_id or 0
         except Exception as e:
             logger.error(f"Failed to save bot token: {e}")
             raise

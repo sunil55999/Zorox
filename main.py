@@ -38,8 +38,11 @@ try:
     sniffio.current_async_library = patched_current_async_library
     
     # Also patch httpcore's detection and async backend
-    import httpcore._synchronization
-    httpcore._synchronization.current_async_library = patched_current_async_library
+    try:
+        import httpcore._synchronization
+        httpcore._synchronization.current_async_library = patched_current_async_library
+    except ImportError:
+        pass
     
     # Ensure AsyncBackend selection works properly for asyncio
     try:
