@@ -690,9 +690,32 @@ class DatabaseManager:
         except Exception as e:
             logger.error(f"Failed to get bot tokens: {e}")
             return []
-
+    
+    async def toggle_bot_token(self, token_id: int) -> bool:
+        """Toggle bot token active status"""
+        try:
+            async with self.get_connection() as conn:
+                # Get current status
+                cursor = await conn.execute(
+                    "SELECT is_active FROM bot_tokens WHERE id = ?", (token_id,)
+                )
+                row = await cursor.fetchone()
+                if not row:
+                    return False
+                
+                new_status = not bool(row[0])
+                cursor = await conn.execute(
+                    "UPDATE bot_tokens SET is_active = ? WHERE id = ?", 
+                    (new_status, token_id)
+                )
+                await conn.commit()
+                return cursor.rowcount > 0
+        except Exception as e:
+            logger.error(f"Failed to toggle bot token: {e}")
+            return False
+    
     async def get_bot_token_by_id(self, token_id: int) -> Optional[Dict[str, Any]]:
-        """Get specific bot token by ID"""
+        """Get a specific bot token by ID"""
         try:
             async with self.get_connection() as conn:
                 cursor = await conn.execute(
@@ -745,13 +768,21 @@ class DatabaseManager:
         """Toggle bot token active status"""
         try:
             async with self.get_connection() as conn:
-                await conn.execute('''
-                    UPDATE bot_tokens 
-                    SET is_active = NOT is_active
-                    WHERE id = ?
-                ''', (token_id,))
+                # Get current status
+                cursor = await conn.execute(
+                    "SELECT is_active FROM bot_tokens WHERE id = ?", (token_id,)
+                )
+                row = await cursor.fetchone()
+                if not row:
+                    return False
+                
+                new_status = not bool(row[0])
+                cursor = await conn.execute(
+                    "UPDATE bot_tokens SET is_active = ? WHERE id = ?", 
+                    (new_status, token_id)
+                )
                 await conn.commit()
-                return True
+                return cursor.rowcount > 0
         except Exception as e:
             logger.error(f"Failed to toggle bot token status: {e}")
             return False
