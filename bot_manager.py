@@ -110,6 +110,9 @@ class BotManager:
         self.pairs: Dict[int, MessagePair] = {}
         self.source_to_pairs: Dict[int, List[int]] = defaultdict(list)
         
+        # Custom bot instances cache for saved bot tokens
+        self.custom_bots: Dict[int, Bot] = {}  # token_id -> Bot instance
+        
         # Error tracking
         self.global_error_count = 0
         self.last_error_time = 0
@@ -411,6 +414,9 @@ class BotManager:
             if self.telethon_client and self.telethon_client.is_connected():
                 await self.telethon_client.disconnect()
             
+            # Clear custom bot instances cache
+            self.custom_bots.clear()
+            
             logger.info("Bot manager stopped")
             
         except Exception as e:
@@ -598,20 +604,37 @@ class BotManager:
         try:
             start_time = time.time()
             
-            # Get bot and pair
-            bot_index = queued_msg.bot_index
-            if bot_index >= len(self.telegram_bots):
-                bot_index = 0  # Fallback to primary bot
-            
-            bot = self.telegram_bots[bot_index]
+            # Get pair first
             pair = self.pairs.get(queued_msg.pair_id)
-            
             if not pair:
                 logger.warning(f"Pair {queued_msg.pair_id} not found")
                 return False
             
-            # Check rate limits
-            if not self._check_rate_limit(bot_index):
+            # Determine which bot to use
+            bot = None
+            bot_index = queued_msg.bot_index
+            
+            # Check if pair has a custom bot token assigned
+            if pair.bot_token_id:
+                logger.debug(f"Using custom bot token {pair.bot_token_id} for pair {pair.id}")
+                bot = await self._get_or_create_custom_bot(pair.bot_token_id)
+                if not bot:
+                    logger.error(f"Failed to get custom bot for token {pair.bot_token_id}, falling back to default bot")
+                    # Fall back to default bot
+                    if bot_index >= len(self.telegram_bots):
+                        bot_index = 0  # Fallback to primary bot
+                    bot = self.telegram_bots[bot_index]
+                else:
+                    # Use a special bot index for custom bots (negative to distinguish from default bots)
+                    bot_index = -pair.bot_token_id
+            else:
+                # Use default bot from config
+                if bot_index >= len(self.telegram_bots):
+                    bot_index = 0  # Fallback to primary bot
+                bot = self.telegram_bots[bot_index]
+            
+            # Check rate limits (only for default bots, custom bots have their own limits)
+            if bot_index >= 0 and not self._check_rate_limit(bot_index):
                 logger.warning(f"Rate limit exceeded for bot {bot_index}")
                 return False
             
@@ -633,16 +656,17 @@ class BotManager:
                     event, pair, bot, bot_index
                 )
             
-            # Update processing time
+            # Update processing time (only for default bots)
             processing_time = time.time() - start_time
-            bot_metrics = self.bot_metrics.get(bot_index)
-            if bot_metrics:
-                # Update average processing time with EMA
-                alpha = 0.1
-                bot_metrics.avg_processing_time = (
-                    alpha * processing_time + 
-                    (1 - alpha) * bot_metrics.avg_processing_time
-                )
+            if bot_index >= 0:  # Only update metrics for default bots
+                bot_metrics = self.bot_metrics.get(bot_index)
+                if bot_metrics:
+                    # Update average processing time with EMA
+                    alpha = 0.1
+                    bot_metrics.avg_processing_time = (
+                        alpha * processing_time + 
+                        (1 - alpha) * bot_metrics.avg_processing_time
+                    )
             
             return success
             
@@ -745,6 +769,57 @@ class BotManager:
                 
             except Exception as e:
                 logger.error(f"Rate limit monitor error: {e}")
+    
+    async def _get_or_create_custom_bot(self, bot_token_id: int) -> Optional[Bot]:
+        """Get or create a Bot instance for a specific bot_token_id"""
+        try:
+            # Check if we already have this bot cached
+            if bot_token_id in self.custom_bots:
+                return self.custom_bots[bot_token_id]
+            
+            # Get token from database
+            token_data = await self.db_manager.get_bot_token_by_id(bot_token_id)
+            if not token_data:
+                logger.error(f"Bot token {bot_token_id} not found in database")
+                return None
+            
+            if not token_data['is_active']:
+                logger.error(f"Bot token {bot_token_id} is not active")
+                return None
+            
+            # Create custom HTTP request handler (same as default bots)
+            from telegram.request import HTTPXRequest
+            request = HTTPXRequest(
+                connection_pool_size=8,
+                read_timeout=30,
+                write_timeout=30,
+                connect_timeout=30,
+                pool_timeout=30
+            )
+            
+            # Create Bot instance
+            bot = Bot(token=token_data['token'], request=request)
+            
+            # Test bot connectivity
+            try:
+                bot_info = await bot.get_me()
+                logger.info(f"Custom bot created for token {bot_token_id}: @{bot_info.username}")
+                
+                # Cache the bot
+                self.custom_bots[bot_token_id] = bot
+                
+                # Update usage count in database
+                await self.db_manager.update_bot_token_usage(bot_token_id)
+                
+                return bot
+                
+            except Exception as e:
+                logger.error(f"Failed to connect to custom bot {bot_token_id}: {e}")
+                return None
+                
+        except Exception as e:
+            logger.error(f"Error creating custom bot for token {bot_token_id}: {e}")
+            return None
     
     async def _log_metrics(self):
         """Log system metrics"""

@@ -165,6 +165,22 @@ The system follows a modular, async-first architecture with clear separation of 
 
 ## Recent Changes
 
+### 2025-07-25: CRITICAL BOT TOKEN BUG FIX COMPLETED ✅
+- ✅ **Fixed Bot Token Assignment Bug**: Resolved critical issue where pairs created with saved bot tokens were using default .env tokens instead
+  - **Root Cause**: The `_process_queued_message` method was only using `pair.assigned_bot_index` to select bots from config's `BOT_TOKENS` list
+  - **Solution**: Enhanced message processing to check for `pair.bot_token_id` and create custom Bot instances from database-saved tokens
+  - **Implementation**: Added `_get_or_create_custom_bot()` method with intelligent caching to avoid recreating Bot instances
+  - **Cache Management**: Implemented `custom_bots` dictionary to cache Bot instances by token_id for performance
+  - **Fallback Safety**: Added graceful fallback to default bots if custom bot token is invalid or inactive
+  - **Usage Tracking**: Integrated automatic usage count updates when custom bot tokens are used
+  - **Rate Limiting**: Custom bots use separate rate limiting logic from default bots to prevent interference
+- ✅ **Enhanced Message Processing Logic**: Updated queue processing to respect bot token assignments
+  - Custom bot tokens identified with negative bot_index values (-token_id) to distinguish from default bots
+  - Proper error handling and logging for custom bot creation and usage
+  - Backward compatibility maintained for existing pairs without bot_token_id assignments
+- ✅ **System Cleanup**: Added proper cleanup of custom bot cache during system shutdown
+- ✅ **Testing Verified**: System successfully starts with custom bot token logic operational
+
 ### 2025-07-25: BOT TOKEN MANAGEMENT SYSTEM COMPLETED ✅
 - ✅ **Complete Bot Token Management Implementation**: Full user-friendly bot token management via commands
   - `/addtoken <name> <token>` and `/addbot <name> <token>` - Add and validate new bot tokens with automatic username detection
