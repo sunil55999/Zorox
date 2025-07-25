@@ -2118,10 +2118,9 @@ Use `/cleanup --force` to proceed with cleanup.
             
             await update.message.reply_text(
                 f"✅ Bot token added successfully!\n"
-                f"**Name:** {name}\n"
-                f"**Username:** @{username}\n"
-                f"**ID:** {token_id}",
-                parse_mode='Markdown'
+                f"Name: {name}\n"
+                f"Username: @{username}\n"
+                f"ID: {token_id}"
             )
             
         except Exception as e:
@@ -2140,17 +2139,17 @@ Use `/cleanup --force` to proceed with cleanup.
                 await update.message.reply_text("No bot tokens found.")
                 return
             
-            tokens_text = "🤖 **Bot Tokens:**\n\n"
+            tokens_text = "🤖 Bot Tokens:\n\n"
             for token in tokens:
                 status = "✅ Active" if token['is_active'] else "❌ Inactive"
                 usage = token['usage_count'] or 0
                 last_used = token['last_used'] or "Never"
                 
-                tokens_text += f"**{token['name']}** (ID: {token['id']})\n"
+                tokens_text += f"{token['name']} (ID: {token['id']})\n"
                 tokens_text += f"   @{token['username']} - {status}\n"
                 tokens_text += f"   Used: {usage} times, Last: {last_used}\n\n"
             
-            await update.message.reply_text(tokens_text, parse_mode='Markdown')
+            await update.message.reply_text(tokens_text)
             
         except Exception as e:
             await update.message.reply_text(f"❌ Error listing tokens: {e}")
