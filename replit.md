@@ -165,7 +165,12 @@ The system follows a modular, async-first architecture with clear separation of 
 
 ## Recent Changes
 
-### 2025-07-25: UNBLOCK WORD COMMAND ENHANCED - COMPLETED ✅
+### 2025-07-25: GLOBAL BLOCKED WORDS CONFIGURATION CLEARED - COMPLETED ✅
+- ✅ **Removed All Default Blocked Words**: Completely cleared the default global blocked words configuration
+  - **Empty Default List**: Default global blocked words list is now empty (no words blocked by default)
+  - **Environment Variable Control**: Only words specified in GLOBAL_BLOCKED_WORDS environment variable will be blocked
+  - **User Control**: All word blocking is now fully controlled by user commands and environment settings
+  - **Clean State**: System starts with no blocked words unless explicitly configured
 - ✅ **Enhanced Unblock Word Command**: Improved error handling and user feedback for remove word functionality
   - **Enhanced Validation**: Now checks if pair exists and if word is actually blocked before attempting removal
   - **Better Feedback**: Shows current blocked words list after successful removal operations
