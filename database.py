@@ -41,6 +41,8 @@ class MessagePair:
                 "sync_deletes": False,
                 "header_regex": "",
                 "footer_regex": "",
+                "watermark_enabled": False,
+                "watermark_text": "",
                 "min_message_length": 0,
                 "max_message_length": 0,
                 "allowed_media_types": ["photo", "video", "document", "audio", "voice"],
@@ -419,6 +421,31 @@ class DatabaseManager:
                 logger.info(f"Deleted pair {pair_id}")
         except Exception as e:
             logger.error(f"Failed to delete pair {pair_id}: {e}")
+            raise
+
+    async def update_pair_filter(self, pair_id: int, key: str, value: Any):
+        """Update specific filter for a pair"""
+        try:
+            pair = await self.get_pair(pair_id)
+            if not pair:
+                raise ValueError(f"Pair {pair_id} not found")
+            
+            # Update the filter
+            filters = pair.filters or {}
+            filters[key] = value
+            
+            # Save updated filters
+            async with self.get_connection() as conn:
+                await conn.execute(
+                    "UPDATE pairs SET filters = ? WHERE id = ?",
+                    (json.dumps(filters), pair_id)
+                )
+                await conn.commit()
+                
+            logger.debug(f"Updated filter '{key}' for pair {pair_id}: {value}")
+            
+        except Exception as e:
+            logger.error(f"Failed to update pair filter: {e}")
             raise
 
     async def save_message_mapping(self, mapping: MessageMapping):

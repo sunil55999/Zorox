@@ -106,7 +106,7 @@ class MessageProcessor:
             contains_urls = bool(processed_content and self._contains_urls(processed_content))
             if contains_urls:
                 logger.info(f"Message contains URLs, will enable webpage preview: {processed_content[:200]}...")
-            elif processed_content and self._contains_simple_urls(processed_content or ""):
+            elif processed_content and self._contains_simple_urls(processed_content):
                 contains_urls = True
                 logger.info(f"Message contains simple URLs, will enable webpage preview: {processed_content[:200]}...")
             
@@ -418,6 +418,44 @@ class MessageProcessor:
                 if not temp_file or not os.path.exists(temp_file):
                     logger.error("Failed to download media")
                     return None
+                
+                # Check if watermarking is enabled for this pair and if this is an image
+                watermark_enabled = pair.filters.get("watermark_enabled", False)
+                watermark_text = pair.filters.get("watermark_text", "")
+                
+                # Apply watermark if enabled and media is an image
+                if watermark_enabled and watermark_text and media_type in ['photo', 'document']:
+                    # Check if it's actually an image for documents
+                    is_image = media_type == 'photo'
+                    if media_type == 'document' and hasattr(event.media, 'document') and event.media.document:
+                        mime_type = getattr(event.media.document, 'mime_type', '').lower()
+                        is_image = mime_type.startswith('image/')
+                    
+                    if is_image:
+                        # Apply watermark
+                        watermarked_file = temp_file.replace(os.path.splitext(temp_file)[1], "_watermarked.jpg")
+                        success = self.image_handler.add_text_watermark(temp_file, watermarked_file, watermark_text)
+                        
+                        if success:
+                            # Clean up original file and use watermarked version
+                            try:
+                                os.unlink(temp_file)
+                            except:
+                                pass
+                            temp_file = watermarked_file
+                            logger.debug(f"Applied watermark to image for pair {pair.id}")
+                        else:
+                            logger.warning(f"Failed to apply watermark to image for pair {pair.id}")
+                
+            except Exception as download_error:
+                # Clean up on error
+                if temp_file and os.path.exists(temp_file):
+                    try:
+                        os.unlink(temp_file)
+                    except:
+                        pass
+                logger.error(f"Error downloading media: {download_error}")
+                return None
                 
                 # Extract media attributes safely
                 filename = None

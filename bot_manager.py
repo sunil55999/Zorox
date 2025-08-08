@@ -309,6 +309,7 @@ class BotManager:
         app.add_handler(CommandHandler("mentions", self._cmd_set_mention_removal))
         app.add_handler(CommandHandler("headerregex", self._cmd_set_header_regex))
         app.add_handler(CommandHandler("footerregex", self._cmd_set_footer_regex))
+        app.add_handler(CommandHandler("watermark", self._cmd_watermark))
         app.add_handler(CommandHandler("testfilter", self._cmd_test_filter))
         
         # Bot token management commands
@@ -2118,6 +2119,67 @@ Use `/cleanup --force` to proceed with cleanup.
             await update.message.reply_text("Invalid pair ID.")
         except Exception as e:
             await update.message.reply_text(f"Error setting footer regex: {e}")
+    
+    async def _cmd_watermark(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Configure watermark for pair"""
+        if not self._is_admin(update.effective_user.id):
+            return
+        
+        try:
+            if len(context.args) < 2:
+                await update.message.reply_text(
+                    "Usage: /watermark <pair_id> <enable|disable> [text]\n"
+                    "Examples:\n"
+                    "/watermark 5 enable @Traders_Hive\n"
+                    "/watermark 5 disable"
+                )
+                return
+            
+            pair_id = int(context.args[0])
+            action = context.args[1].lower()
+            text = " ".join(context.args[2:]) if len(context.args) > 2 else None
+            
+            if action not in ['enable', 'disable']:
+                await update.message.reply_text("Action must be 'enable' or 'disable'")
+                return
+            
+            # Check if pair exists
+            if pair_id not in self.pairs:
+                await update.message.reply_text(f"Pair {pair_id} not found")
+                return
+            
+            enable_watermark = action == 'enable'
+            
+            # Update watermark settings
+            await self.db_manager.update_pair_filter(pair_id, "watermark_enabled", enable_watermark)
+            
+            if text and enable_watermark:
+                await self.db_manager.update_pair_filter(pair_id, "watermark_text", text)
+            
+            # Reload pairs to get updated configuration
+            await self._load_pairs()
+            
+            # Build response message
+            status = "enabled" if enable_watermark else "disabled"
+            response = f"✅ Watermark {status} for pair {pair_id}"
+            
+            if enable_watermark and text:
+                response += f" with text: {text}"
+            elif enable_watermark and not text:
+                # Get current text from pair if any
+                pair = self.pairs.get(pair_id)
+                if pair and pair.filters.get("watermark_text"):
+                    current_text = pair.filters["watermark_text"]
+                    response += f" (using existing text: {current_text})"
+                else:
+                    response += " (no watermark text set - images will have blank overlay)"
+            
+            await update.message.reply_text(response)
+            
+        except ValueError:
+            await update.message.reply_text("Invalid pair ID.")
+        except Exception as e:
+            await update.message.reply_text(f"Error configuring watermark: {e}")
     
     async def _cmd_test_filter(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Test filtering on a message"""

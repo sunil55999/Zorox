@@ -1,0 +1,166 @@
+You are enhancing an existing Python project called "Telegram Message Copying Bot System".
+
+---
+
+## Goal
+Implement a per-pair **text watermark** feature for forwarded images/media.
+
+---
+
+## Requirements
+
+### 1. Per-Pair Toggle & Custom Text
+- Ability to enable or disable watermarking for each pair independently.
+- Ability to set custom watermark text for each pair.
+- Admin command syntax:
+/watermark <pair_id> <enable|disable> [text]
+
+makefile
+Copy
+Edit
+Examples:
+/watermark 5 enable @Traders_Hive
+/watermark 5 disable
+
+yaml
+Copy
+Edit
+
+---
+
+### 2. Database Integration
+- Store watermark settings in the `filters` JSON column of the `pairs` table.
+- Keys:
+```json
+{
+  "watermark_enabled": true,
+  "watermark_text": "@Traders_Hive"
+}
+Add/update helper in database.py:
+
+python
+Copy
+Edit
+async def update_pair_filter(self, pair_id, key, value):
+    pair = await self.get_pair(pair_id)
+    filters = pair.filters or {}
+    filters[key] = value
+    await self.connection.execute(
+        "UPDATE pairs SET filters = ? WHERE id = ?",
+        (json.dumps(filters), pair_id)
+    )
+    await self.connection.commit()
+3. Bot Command Implementation (bot_manager.py)
+Implement /watermark command:
+
+Checks _is_admin() before proceeding.
+
+Saves watermark_enabled and optionally watermark_text to DB via update_pair_filter.
+
+Sends confirmation message to admin.
+
+Example:
+
+python
+Copy
+Edit
+async def cmd_watermark(update, context):
+    if not self._is_admin(update.effective_user.id):
+        return await update.message.reply_text("🚫 Not authorized")
+
+    if len(context.args) < 2:
+        return await update.message.reply_text("Usage: /watermark <pair_id> <enable|disable> [text]")
+
+    pair_id = int(context.args[0])
+    status = context.args[1].lower() == "enable"
+    text = " ".join(context.args[2:]) if len(context.args) > 2 else None
+
+    await self.db.update_pair_filter(pair_id, "watermark_enabled", status)
+    if text:
+        await self.db.update_pair_filter(pair_id, "watermark_text", text)
+
+    await update.message.reply_text(
+        f"✅ Watermark {'enabled' if status else 'disabled'} for pair {pair_id}"
+        + (f" with text: {text}" if text else "")
+    )
+4. Text Watermark Function (image_handler.py)
+Use Pillow (PIL) to overlay semi-transparent centered text.
+
+Font size should scale with image width (e.g., 5% of width).
+
+Opacity ~40% (adjust alpha channel accordingly).
+
+Position text in center of image.
+
+Example:
+
+python
+Copy
+Edit
+from PIL import Image, ImageDraw, ImageFont
+
+def add_text_watermark(input_path, output_path, text):
+    base = Image.open(input_path).convert("RGBA")
+    txt_layer = Image.new("RGBA", base.size, (255,255,255,0))
+
+    draw = ImageDraw.Draw(txt_layer)
+    font_size = int(base.width * 0.05)
+    font = ImageFont.truetype("arial.ttf", font_size)
+
+    text_width, text_height = draw.textsize(text, font=font)
+    x = (base.width - text_width) // 2
+    y = (base.height - text_height) // 2
+
+    draw.text((x, y), text, font=font, fill=(255,255,255,100))
+
+    watermarked = Image.alpha_composite(base, txt_layer)
+    watermarked.convert("RGB").save(output_path, "JPEG")
+5. Integration into Forwarding Pipeline
+In message_processor.py (inside media handling section):
+
+Check if pair.filters.get("watermark_enabled") is True.
+
+If yes:
+
+Download media to a temp file.
+
+Apply add_text_watermark() using pair.filters.get("watermark_text").
+
+Send modified file to destination channel.
+
+If no: send original file.
+
+Example:
+
+python
+Copy
+Edit
+if message.media and pair.filters.get("watermark_enabled"):
+    text = pair.filters.get("watermark_text", "")
+    temp_in = await download_media(message)
+    temp_out = temp_in.replace(".jpg", "_wm.jpg")
+    add_text_watermark(temp_in, temp_out, text)
+    send_media(temp_out)
+else:
+    send_media(original_file)
+6. Testing
+Test cases:
+
+Image forwarding with watermark disabled → original image sent.
+
+Image forwarding with watermark enabled, no custom text → sends with blank/no overlay.
+
+Image forwarding with watermark enabled + text → text appears centered, semi-transparent, correct size.
+
+Large and small images → text scales proportionally.
+
+Watermark persists across restarts (saved in DB).
+
+7. Constraints
+Do not break existing forwarding/filtering logic.
+
+Keep image format and quality consistent with original.
+
+Ensure it works with multiple bot tokens and pairs.
+
+Handle PNG, JPEG, and WebP formats.

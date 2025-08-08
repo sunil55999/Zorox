@@ -24,10 +24,10 @@ The system employs a modular, async-first, event-driven architecture designed fo
 
 ### Key Components
 - **Bot Manager**: Orchestrates multiple Telegram bots, manages priority-based queues, handles load balancing, health monitoring, and ensures rate limit compliance.
-- **Message Processor**: Manages core message copying, including media handling, premium content, reply chain preservation, and real-time edit/delete synchronization. It also features entity-aware content transformation and improved header/footer/mention removal.
+- **Message Processor**: Manages core message copying, including media handling, premium content, reply chain preservation, and real-time edit/delete synchronization. It also features entity-aware content transformation, improved header/footer/mention removal, and integrated image watermarking.
 - **Filter System**: Provides advanced message filtering based on words/phrases (including regex), media types (with perceptual hashing for duplicate images), time, and user. It supports entity preservation during text transformations.
 - **Database Manager**: Handles SQLite database operations for message pair management, message mapping, automatic backups, and statistics.
-- **Image Handler**: Implements a comprehensive image blocking system using perceptual hashing for duplicate detection and manages block lists via bot commands.
+- **Image Handler**: Implements a comprehensive image blocking system using perceptual hashing for duplicate detection, manages block lists via bot commands, and provides text watermarking functionality with PIL/ImageDraw integration.
 - **Health Monitor**: Tracks system health, performance metrics, error rates, and resource usage.
 
 ### Data Flow
@@ -39,6 +39,7 @@ The system employs a modular, async-first, event-driven architecture designed fo
 - **Feature Specifications**:
     - **Multi-bot support**: Load balancing and assignment of specific bots to message pairs.
     - **Advanced Filtering**: Perceptual hash-based image blocking, word/phrase blocking (global and pair-specific), regex-based header/footer removal, and comprehensive mention removal.
+    - **Image Watermarking**: Per-pair text watermarking for forwarded images with customizable text, semi-transparent overlay, and automatic scaling.
     - **Content Preservation**: Full support for preserving media, Telegram entities (formatting, custom emojis), and reply chains.
     - **Scalability**: Optimized configuration for handling 100+ message forwarding pairs with increased workers, queue sizes, and connection pools.
     - **Security**: Secure token handling, access control via chat validation, and robust error isolation.

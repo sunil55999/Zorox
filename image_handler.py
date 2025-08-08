@@ -1,9 +1,11 @@
 """
-Image duplicate detection and blocking system
+Image duplicate detection and blocking system with watermarking support
 """
 
 import logging
 import hashlib
+import os
+import tempfile
 from typing import Optional, Dict, List, Any
 from io import BytesIO
 from datetime import datetime
@@ -16,10 +18,14 @@ logger = logging.getLogger(__name__)
 # Try to import image processing libraries
 try:
     import imagehash
-    from PIL import Image
+    from PIL import Image, ImageDraw, ImageFont
     IMAGE_PROCESSING_AVAILABLE = True
 except ImportError:
     IMAGE_PROCESSING_AVAILABLE = False
+    imagehash = None
+    Image = None
+    ImageDraw = None
+    ImageFont = None
     logger.warning("Image processing libraries not available. Image blocking disabled.")
 
 class ImageHandler:
@@ -282,6 +288,79 @@ class ImageHandler:
         except Exception as e:
             logger.error(f"Failed to get blocked images: {e}")
             return []
+    
+    def add_text_watermark(self, input_path: str, output_path: str, text: str) -> bool:
+        """Add semi-transparent text watermark to image center"""
+        if not self.enabled or not IMAGE_PROCESSING_AVAILABLE:
+            logger.warning("Image processing not available, skipping watermark")
+            return False
+        
+        try:
+            # Open base image and convert to RGBA for transparency support
+            base = Image.open(input_path).convert("RGBA")
+            
+            # Create transparent overlay layer
+            txt_layer = Image.new("RGBA", base.size, (255, 255, 255, 0))
+            draw = ImageDraw.Draw(txt_layer)
+            
+            # Calculate font size (5% of image width)
+            font_size = max(int(base.width * 0.05), 12)  # Minimum 12px font
+            
+            # Try to load system font, fallback to default
+            font = None
+            for font_path in ["/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+                            "/System/Library/Fonts/Arial.ttf", 
+                            "/Windows/Fonts/arial.ttf"]:
+                try:
+                    if os.path.exists(font_path):
+                        font = ImageFont.truetype(font_path, font_size)
+                        break
+                except:
+                    continue
+            
+            # Use default font if no system font found
+            if font is None:
+                try:
+                    font = ImageFont.load_default()
+                except:
+                    logger.warning("Could not load any font, using basic text rendering")
+                    font = None
+            
+            # Get text dimensions
+            if font:
+                bbox = draw.textbbox((0, 0), text, font=font)
+                text_width = bbox[2] - bbox[0]
+                text_height = bbox[3] - bbox[1]
+            else:
+                # Estimate text size without font
+                text_width = len(text) * (font_size // 2)
+                text_height = font_size
+            
+            # Center text position
+            x = (base.width - text_width) // 2
+            y = (base.height - text_height) // 2
+            
+            # Draw semi-transparent white text (40% opacity = 102 alpha)
+            text_color = (255, 255, 255, 102)
+            
+            if font:
+                draw.text((x, y), text, font=font, fill=text_color)
+            else:
+                draw.text((x, y), text, fill=text_color)
+            
+            # Composite the layers
+            watermarked = Image.alpha_composite(base, txt_layer)
+            
+            # Convert back to RGB and save as JPEG
+            final_image = watermarked.convert("RGB")
+            final_image.save(output_path, "JPEG", quality=95)
+            
+            logger.debug(f"Added watermark '{text}' to image: {input_path} -> {output_path}")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Failed to add watermark: {e}")
+            return False
     
     async def cleanup_unused_blocks(self, days: int = 30):
         """Clean up unused image blocks"""
