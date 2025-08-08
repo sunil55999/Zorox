@@ -1,10 +1,11 @@
-modules = ["python-3.11", "postgresql-16"]
+modules = ["python-3.11"]
 
 [nix]
 channel = "stable-25_05"
 packages = ["cacert", "coreutils", "freetype", "glibcLocales", "lcms2", "libimagequant", "libjpeg", "libtiff", "libwebp", "libxcrypt", "openjpeg", "openssl", "pkg-config", "sqlite", "tcl", "tk", "xsimd", "zlib"]
 
 [workflows]
+runButton = "Project"
 
 [[workflows.workflow]]
 name = "Project"
@@ -35,6 +36,9 @@ author = "agent"
 task = "shell.exec"
 args = "python main.py"
 
+[workflows.workflow.metadata]
+outputType = "console"
+
 [[workflows.workflow]]
 name = "Start Bot System"
 author = 45480059
@@ -51,3 +55,6 @@ args = "python main.py"
 [[ports]]
 localPort = 5000
 externalPort = 80
+
+[agent]
+expertMode = true
