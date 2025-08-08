@@ -156,26 +156,26 @@ class MessageFilter:
             
             logger.info(f"Starting text filtering for pair {pair.id}")
             
-            # Remove header/footer based on regex patterns (per-pair)
-            header_patterns = pair.filters.get("header_regex", [])
-            if header_patterns:
-                if isinstance(header_patterns, str):
-                    header_patterns = [header_patterns]
-                logger.info(f"Applying header removal with patterns: {header_patterns}")
+            # Apply header/footer regex removal even if entities exist
+            header_pattern = pair.filters.get("header_regex", "")
+            if header_pattern and header_pattern.strip():
+                logger.info(f"Applying header removal with pattern: {header_pattern}")
                 before_header = filtered_text
-                filtered_text = self._remove_headers(filtered_text, header_patterns)
+                filtered_text, processed_entities = self._remove_headers_with_entities(
+                    filtered_text, processed_entities, header_pattern
+                )
                 if before_header != filtered_text:
                     logger.info(f"Header removal changed text: {len(before_header)} → {len(filtered_text)} chars")
                 else:
                     logger.info("Header removal: no changes made")
             
-            footer_patterns = pair.filters.get("footer_regex", [])
-            if footer_patterns:
-                if isinstance(footer_patterns, str):
-                    footer_patterns = [footer_patterns]
-                logger.info(f"Applying footer removal with patterns: {footer_patterns}")
+            footer_pattern = pair.filters.get("footer_regex", "")
+            if footer_pattern and footer_pattern.strip():
+                logger.info(f"Applying footer removal with pattern: {footer_pattern}")
                 before_footer = filtered_text
-                filtered_text = self._remove_footers(filtered_text, footer_patterns)
+                filtered_text, processed_entities = self._remove_footers_with_entities(
+                    filtered_text, processed_entities, footer_pattern
+                )
                 if before_footer != filtered_text:
                     logger.info(f"Footer removal changed text: {len(before_footer)} → {len(filtered_text)} chars")
                 else:
@@ -689,7 +689,7 @@ class MessageFilter:
             logger.error(f"Failed to remove pair word block: {e}")
             return False
     
-    async def set_pair_header_footer_regex(self, pair_id: int, header_regex: str = None, footer_regex: str = None):
+    async def set_pair_header_footer_regex(self, pair_id: int, header_regex: Optional[str] = None, footer_regex: Optional[str] = None):
         """Set header/footer regex patterns for pair"""
         try:
             pair = await self.db_manager.get_pair_by_id(pair_id)
@@ -697,30 +697,34 @@ class MessageFilter:
                 return False
             
             if header_regex is not None:
-                if header_regex:
+                if header_regex.strip():  # Check if not empty after stripping
                     # Validate regex
                     try:
                         re.compile(header_regex)
                         pair.filters["header_regex"] = header_regex
+                        logger.info(f"Set header regex for pair {pair_id}: {header_regex}")
                     except re.error as e:
                         logger.error(f"Invalid header regex: {e}")
                         return False
                 else:
                     # Remove header regex
                     pair.filters.pop("header_regex", None)
+                    logger.info(f"Cleared header regex for pair {pair_id}")
             
             if footer_regex is not None:
-                if footer_regex:
+                if footer_regex.strip():  # Check if not empty after stripping
                     # Validate regex
                     try:
                         re.compile(footer_regex)
                         pair.filters["footer_regex"] = footer_regex
+                        logger.info(f"Set footer regex for pair {pair_id}: {footer_regex}")
                     except re.error as e:
                         logger.error(f"Invalid footer regex: {e}")
                         return False
                 else:
                     # Remove footer regex
                     pair.filters.pop("footer_regex", None)
+                    logger.info(f"Cleared footer regex for pair {pair_id}")
             
             await self.db_manager.update_pair(pair)
             logger.info(f"Updated header/footer regex for pair {pair_id}")
@@ -816,61 +820,50 @@ class MessageFilter:
             logger.error(f"Error removing mentions: {e}")
             return text
     
-    def _remove_headers(self, text: str, patterns: List[str]) -> str:
-        """Enhanced header removal with precise pattern matching preserving message structure"""
+    def _remove_headers(self, text: str, pattern: str) -> str:
+        """Enhanced header removal with single pattern matching preserving message structure"""
         try:
-            if not text:
+            if not text or not pattern:
                 return text
                 
             original_text = text
             
-            # Convert single pattern to list if needed
-            if isinstance(patterns, str):
-                patterns = [patterns]
-            
-            if not patterns:
+            # Validate regex pattern
+            try:
+                compiled_pattern = re.compile(pattern, re.IGNORECASE | re.MULTILINE)
+            except re.error as e:
+                logger.warning(f"Invalid header regex pattern '{pattern}': {e}")
                 return text
             
-            # Split into lines while preserving structure
+            # Split text into lines for line-by-line header removal
             lines = text.split('\n')
             filtered_lines = []
-            headers_removed = 0
+            header_removed = False
             
-            # Only check the first few lines for headers (usually headers are at the top)
-            max_header_lines = min(3, len(lines))  # Check only first 3 lines for headers
+            # Check first few lines for headers (headers are typically at the top)
+            max_header_lines = min(3, len(lines))
             
             for i, line in enumerate(lines):
-                line_removed = False
-                
-                # Only check for headers in the first few lines and only if line has content
-                if i < max_header_lines and line.strip():
-                    # Check each pattern against the current line
-                    for pattern in patterns:
-                        try:
-                            # Match the pattern against the trimmed line
-                            if re.match(pattern, line.strip(), re.IGNORECASE | re.MULTILINE):
-                                line_removed = True
-                                headers_removed += 1
-                                logger.info(f"Header removed: '{line.strip()}' matched pattern: {pattern}")
-                                break
-                        except re.error as regex_error:
-                            logger.warning(f"Invalid header regex pattern '{pattern}': {regex_error}")
-                            continue
+                # Only check for headers in the first few lines
+                if i < max_header_lines and not header_removed and line.strip():
+                    # Try to match the pattern against this line
+                    if compiled_pattern.match(line.strip()):
+                        logger.info(f"Header removed: '{line.strip()}' matched pattern: {pattern}")
+                        header_removed = True
+                        continue  # Skip this line (remove it)
                 
                 # Keep lines that don't match header patterns
-                if not line_removed:
-                    filtered_lines.append(line)
+                filtered_lines.append(line)
             
             # If no headers were removed, return original
-            if headers_removed == 0:
+            if not header_removed:
                 return original_text
             
             # Rejoin lines preserving original formatting
             result_text = '\n'.join(filtered_lines)
             
-            # Clean up leading whitespace but preserve paragraph structure
-            while result_text.startswith('\n'):
-                result_text = result_text[1:]
+            # Clean up excessive whitespace at the beginning
+            result_text = result_text.lstrip('\n').strip()
             
             # If result is empty or only whitespace, return original
             if not result_text or result_text.isspace():
@@ -882,68 +875,50 @@ class MessageFilter:
             logger.error(f"Error removing headers: {e}")
             return text
     
-    def _remove_footers(self, text: str, patterns: List[str]) -> str:
-        """Enhanced footer removal with precise pattern matching preserving message structure"""
+    def _remove_footers(self, text: str, pattern: str) -> str:
+        """Enhanced footer removal with single pattern matching preserving message structure"""
         try:
-            if not text:
+            if not text or not pattern:
                 return text
                 
             original_text = text
             
-            # Convert single pattern to list if needed
-            if isinstance(patterns, str):
-                patterns = [patterns]
-            
-            if not patterns:
+            # Validate regex pattern
+            try:
+                compiled_pattern = re.compile(pattern, re.IGNORECASE | re.MULTILINE)
+            except re.error as e:
+                logger.warning(f"Invalid footer regex pattern '{pattern}': {e}")
                 return text
             
-            # Split into lines while preserving structure
+            # Split text into lines for line-by-line footer removal
             lines = text.split('\n')
             filtered_lines = list(lines)
-            footers_removed = 0
+            footer_removed = False
             
-            # Only check the last few lines for footers (usually footers are at the bottom)
-            max_footer_lines = min(3, len(lines))  # Check only last 3 lines for footers
+            # Check last few lines for footers (footers are typically at the bottom)
+            max_footer_lines = min(3, len(lines))
             start_index = max(0, len(lines) - max_footer_lines)
             
-            # Process lines from bottom to top to remove footers cleanly
+            # Process lines from bottom to top
             for i in range(len(lines) - 1, start_index - 1, -1):
                 line = lines[i]
-                line_removed = False
-                
-                # Only check for footers at the end and only if line has content
-                if line.strip():
-                    # Check each pattern against the current line
-                    for pattern in patterns:
-                        try:
-                            # Match the pattern against the trimmed line
-                            if re.match(pattern, line.strip(), re.IGNORECASE | re.MULTILINE):
-                                # Remove this line from the filtered list
-                                if i < len(filtered_lines):
-                                    filtered_lines.pop(i)
-                                    line_removed = True
-                                    footers_removed += 1
-                                    logger.info(f"Footer removed: '{line.strip()}' matched pattern: {pattern}")
-                                    break
-                        except re.error as regex_error:
-                            logger.warning(f"Invalid footer regex pattern '{pattern}': {regex_error}")
-                            continue
-                    
-                    # If we removed a footer, continue checking previous lines
-                    # If no footer found, stop (footers should be consecutive at the end)
-                    if not line_removed:
-                        break
+                if line.strip() and compiled_pattern.match(line.strip()):
+                    # Remove this line
+                    if i < len(filtered_lines):
+                        filtered_lines.pop(i)
+                        footer_removed = True
+                        logger.info(f"Footer removed: '{line.strip()}' matched pattern: {pattern}")
+                        break  # Remove only the first matching footer from the bottom
             
             # If no footers were removed, return original
-            if footers_removed == 0:
+            if not footer_removed:
                 return original_text
             
             # Rejoin lines preserving original formatting
             result_text = '\n'.join(filtered_lines)
             
-            # Clean up trailing whitespace but preserve paragraph structure
-            while result_text.endswith('\n\n\n'):
-                result_text = result_text[:-1]
+            # Clean up excessive whitespace at the end
+            result_text = result_text.rstrip('\n').strip()
             
             # If result is empty or only whitespace, return original
             if not result_text or result_text.isspace():
@@ -1016,3 +991,98 @@ class MessageFilter:
         except Exception as e:
             logger.error(f"Error adjusting entities after transformation: {e}")
             return entities
+    
+    def _remove_headers_with_entities(self, text: str, entities: List, pattern: str) -> tuple[str, List]:
+        """Remove headers while preserving Telegram entities"""
+        try:
+            if not text or not pattern:
+                return text, entities
+            
+            # Apply header removal
+            filtered_text = self._remove_headers(text, pattern)
+            
+            # If text didn't change, return original entities
+            if filtered_text == text:
+                return text, entities
+            
+            # Calculate length difference
+            length_diff = len(text) - len(filtered_text)
+            
+            # Adjust entity offsets
+            adjusted_entities = []
+            for entity in entities or []:
+                if not hasattr(entity, 'offset') or not hasattr(entity, 'length'):
+                    continue
+                
+                entity_offset = entity.offset
+                entity_length = entity.length
+                
+                # If entity is completely before the removed text, keep it
+                if entity_offset + entity_length <= length_diff:
+                    continue  # Entity was in the removed header, skip it
+                
+                # If entity starts after the removed text, adjust offset
+                if entity_offset >= length_diff:
+                    entity.offset = entity_offset - length_diff
+                    # Ensure entity is within bounds
+                    if entity.offset + entity_length <= len(filtered_text):
+                        adjusted_entities.append(entity)
+                elif entity_offset < length_diff and entity_offset + entity_length > length_diff:
+                    # Entity spans the removal point, adjust it
+                    new_length = entity_length - (length_diff - entity_offset)
+                    if new_length > 0:
+                        entity.offset = 0
+                        entity.length = new_length
+                        adjusted_entities.append(entity)
+                else:
+                    # Entity is completely within bounds, keep it
+                    adjusted_entities.append(entity)
+            
+            return filtered_text, adjusted_entities
+            
+        except Exception as e:
+            logger.error(f"Error removing headers with entities: {e}")
+            return text, entities
+    
+    def _remove_footers_with_entities(self, text: str, entities: List, pattern: str) -> tuple[str, List]:
+        """Remove footers while preserving Telegram entities"""
+        try:
+            if not text or not pattern:
+                return text, entities
+            
+            original_length = len(text)
+            
+            # Apply footer removal
+            filtered_text = self._remove_footers(text, pattern)
+            
+            # If text didn't change, return original entities
+            if filtered_text == text:
+                return text, entities
+            
+            new_length = len(filtered_text)
+            
+            # Adjust entities that might be affected by footer removal
+            adjusted_entities = []
+            for entity in entities or []:
+                if not hasattr(entity, 'offset') or not hasattr(entity, 'length'):
+                    continue
+                
+                entity_offset = entity.offset
+                entity_length = entity.length
+                entity_end = entity_offset + entity_length
+                
+                # If entity is completely within the remaining text, keep it
+                if entity_end <= new_length:
+                    adjusted_entities.append(entity)
+                # If entity starts within remaining text but extends beyond, truncate it
+                elif entity_offset < new_length < entity_end:
+                    entity.length = new_length - entity_offset
+                    if entity.length > 0:
+                        adjusted_entities.append(entity)
+                # Entities that start after the remaining text are removed (they were in footer)
+            
+            return filtered_text, adjusted_entities
+            
+        except Exception as e:
+            logger.error(f"Error removing footers with entities: {e}")
+            return text, entities

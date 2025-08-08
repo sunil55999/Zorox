@@ -1,0 +1,93 @@
+You are enhancing an existing Python project called "Telegram Message Copying Bot System".
+
+Root cause of current bug:
+- /headerregex and /footerregex commands are declared but not fully implemented
+- Regex patterns are not being saved correctly into the `filters` JSON column in the `pairs` table
+- `filters.py` tries to read patterns as arrays, but data is stored as strings or missing entirely
+- Regex functions `_remove_headers()` and `_remove_footers()` are never called because the pattern variables are empty
+- When entities exist in a message, the system sometimes skips regex removal to avoid breaking entity offsets
+
+---
+
+### Your Goal
+Make header/footer removal **fully functional** while preserving Telegram entities (bold, italic, links, etc.).
+
+---
+
+### Changes to Implement
+
+#### 1. **Command Handlers in `bot_manager.py`**
+- Implement `_cmd_set_header_regex()` and `_cmd_set_footer_regex()` if missing.
+- Syntax:
+/headerregex <pair_id> <regex_pattern>
+/footerregex <pair_id> <regex_pattern>
+
+markdown
+Copy
+Edit
+- Validate the regex pattern before saving (catch `re.error`).
+- Store the patterns as **strings** in `pair.filters` (JSON), not arrays.
+- Use `await self.message_filter.set_pair_header_footer_regex(pair_id, header_regex, footer_regex)` to save.
+
+#### 2. **Database and Storage**
+- In `filters.py`, make `set_pair_header_footer_regex()` update the JSON correctly:
+- Load existing `filters` JSON for the pair
+- Update the `header_regex` or `footer_regex` key with the string pattern
+- Save back to the database
+- Ensure retrieval in `filter_text()`:
+```python
+header_pattern = pair.filters.get("header_regex")
+footer_pattern = pair.filters.get("footer_regex")
+3. Execution in filters.py
+In filter_text(), apply _remove_headers() and _remove_footers() even if entities exist:
+
+Use telethon.utils.add_surrogate + entity offset recalculation so formatting stays correct after text changes
+
+Or apply regex first, then re-map entities to adjusted offsets
+
+Ensure patterns are only applied if they are non-empty strings.
+
+4. Regex Processing Functions
+_remove_headers(text, pattern) should:
+
+Compile regex with re.MULTILINE and re.DOTALL
+
+Apply re.sub() on the first match only for headers
+
+_remove_footers(text, pattern) should:
+
+Compile regex
+
+Apply re.sub() from the end of the string
+
+5. Entity Preservation
+Use telethon.tl.types.MessageEntity* offsets to re-map after regex removal
+
+Adjust offsets by difference in text length before/after regex
+
+Keep all formatting intact
+
+6. Testing
+Test with:
+
+Plain text
+
+Text with bold, italic, and hyperlinks
+
+Messages with both header and footer removed
+
+Confirm formatting survives after removal
+
+Confirm /headerregex and /footerregex updates are persistent in DB
+
+Deliverables
+Updated bot_manager.py with working /headerregex and /footerregex commands
+
+Updated filters.py with proper saving/loading of regex patterns
+
+Updated regex application in filter_text() to work regardless of entities
+
+Full entity-preserving text transformation
+
+Validation and error handling for bad regex patterns
+

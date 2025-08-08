@@ -39,10 +39,8 @@ class MessagePair:
                 "preserve_replies": True,
                 "sync_edits": True,
                 "sync_deletes": False,
-                "remove_headers": False,
-                "header_patterns": [],
-                "remove_footers": False,
-                "footer_patterns": [],
+                "header_regex": "",
+                "footer_regex": "",
                 "min_message_length": 0,
                 "max_message_length": 0,
                 "allowed_media_types": ["photo", "video", "document", "audio", "voice"],
@@ -474,7 +472,7 @@ class DatabaseManager:
         except Exception as e:
             logger.error(f"Failed to log error: {e}")
 
-    async def get_setting(self, key: str, default: str = None) -> str:
+    async def get_setting(self, key: str, default: Optional[str] = None) -> str:
         """Get system setting"""
         try:
             async with self.get_connection() as conn:

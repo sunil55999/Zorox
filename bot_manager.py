@@ -2061,7 +2061,7 @@ Use `/cleanup --force` to proceed with cleanup.
             pattern = " ".join(context.args[1:])
             
             if pattern.lower() == 'clear':
-                pattern = None
+                pattern = ""
             
             success = await self.message_filter.set_pair_header_footer_regex(pair_id, header_regex=pattern)
             
@@ -2099,7 +2099,7 @@ Use `/cleanup --force` to proceed with cleanup.
             pattern = " ".join(context.args[1:])
             
             if pattern.lower() == 'clear':
-                pattern = None
+                pattern = ""
             
             success = await self.message_filter.set_pair_header_footer_regex(pair_id, footer_regex=pattern)
             
