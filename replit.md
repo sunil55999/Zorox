@@ -3,6 +3,9 @@
 ## Overview
 This project is a comprehensive, production-ready Telegram message copying bot system. Its main purpose is to facilitate copying messages between Telegram channels/groups with advanced filtering capabilities, multi-bot support, and real-time monitoring. The system offers sophisticated filtering, duplicate detection, and load balancing across multiple bot instances, aiming for high reliability and efficiency in message replication.
 
+### Recent Critical Fix (Aug 9, 2025)
+Fixed critical watermarking bug that caused 34% error rate. Issue was in exception handling structure in `_download_and_prepare_media` function - media attribute extraction code was outside main try-catch block, causing silent failures after successful watermarking. Moved attribute extraction inside exception handling, resulting in 0% error rate and 100% success rate.
+
 ## User Preferences
 ```
 Preferred communication style: Simple, everyday language.

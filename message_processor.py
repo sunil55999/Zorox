@@ -95,6 +95,7 @@ class MessageProcessor:
                     return True
                 
                 media_info = await self._download_and_prepare_media(event, pair, bot)
+                logger.info(f"[MEDIA_DEBUG] Media info returned: {media_info is not None}, Type: {media_info.get('type') if media_info else None}")
                 if media_info is False:  # Media blocked
                     self.stats['messages_filtered'] += 1
                     pair.stats['messages_filtered'] = pair.stats.get('messages_filtered', 0) + 1
@@ -483,19 +484,8 @@ class MessageProcessor:
                 else:
                     logger.info(f"[MEDIA_DEBUG] Skipping watermark - conditions not met, Pair: {pair.id}")
                 
-            except Exception as download_error:
-                # Clean up on error
-                if temp_file and os.path.exists(temp_file):
-                    try:
-                        os.unlink(temp_file)
-                    except:
-                        pass
-                import traceback
-                logger.error(f"[MEDIA_DEBUG] Error during media download/processing - Pair: {pair.id}, Type: {media_type}, Error: {download_error}")
-                logger.error(f"[MEDIA_DEBUG] Full traceback: {traceback.format_exc()}")
-                return None
-                
                 # Extract media attributes safely
+                logger.info(f"[MEDIA_DEBUG] Extracting attributes - Type: {media_type}, File: {temp_file}, Pair: {getattr(pair, 'id', 'unknown')}")
                 filename = None
                 duration = None
                 width = None
@@ -522,6 +512,15 @@ class MessageProcessor:
                         height = getattr(largest_size, 'h', None)
                 
                 # Prepare media for Bot API with file cleanup
+                try:
+                    file_size = os.path.getsize(temp_file) if temp_file and os.path.exists(temp_file) else 0
+                    pair_id = getattr(pair, 'id', 'unknown')
+                    logger.info(f"[MEDIA_DEBUG] Returning media info - Type: {media_type}, File: {temp_file}, Size: {file_size} bytes, Pair: {pair_id}")
+                except Exception as size_error:
+                    logger.warning(f"[MEDIA_DEBUG] Error getting file size: {size_error}")
+                    file_size = 0
+                    pair_id = 'unknown'
+                
                 return {
                     'type': media_type,
                     'file_path': temp_file,
@@ -533,8 +532,24 @@ class MessageProcessor:
                     'cleanup_required': True
                 }
                 
+            except Exception as download_error:
+                # Clean up on error
+                if temp_file and os.path.exists(temp_file):
+                    try:
+                        os.unlink(temp_file)
+                    except:
+                        pass
+                import traceback
+                pair_id = getattr(pair, 'id', 'unknown')
+                logger.error(f"[MEDIA_DEBUG] Error during media download/processing - Pair: {pair_id}, Type: {media_type}, Error: {download_error}")
+                logger.error(f"[MEDIA_DEBUG] Full traceback: {traceback.format_exc()}")
+                return None
+                
         except Exception as e:
-            logger.error(f"Error preparing media: {e}")
+            import traceback
+            pair_id = getattr(pair, 'id', 'unknown')
+            logger.error(f"[MEDIA_DEBUG] Error preparing media - Pair: {pair_id}, Error: {e}")
+            logger.error(f"[MEDIA_DEBUG] Full traceback: {traceback.format_exc()}")
             return None
             
     async def _download_media(self, event) -> Optional[BytesIO]:
