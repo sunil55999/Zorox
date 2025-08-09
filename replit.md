@@ -40,7 +40,7 @@ The system employs a modular, async-first, event-driven architecture designed fo
 - **Feature Specifications**:
     - **Multi-bot support**: Load balancing and assignment of specific bots to message pairs.
     - **Advanced Filtering**: Perceptual hash-based image blocking, word/phrase blocking (global and pair-specific), regex-based header/footer removal, and comprehensive mention removal.
-    - **Image Watermarking**: Per-pair text watermarking for forwarded images with customizable text, semi-transparent overlay, and automatic scaling.
+    - **Image Watermarking**: Per-pair text watermarking system with centered overlay, customizable text, and semi-transparent rendering.
     - **Content Preservation**: Full support for preserving media, Telegram entities (formatting, custom emojis), and reply chains.
     - **User Management**: Mass user kicking/unbanning across all channels with support for both user IDs and usernames.
     - **Subscription Management**: Timed subscription system with automatic expiry-based kicking, subscription renewal, and comprehensive tracking.

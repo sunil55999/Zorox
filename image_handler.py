@@ -29,7 +29,7 @@ except ImportError:
     logger.warning("Image processing libraries not available. Image blocking disabled.")
 
 class ImageHandler:
-    """Image duplicate detection and blocking system"""
+    """Image duplicate detection and blocking system with watermarking support"""
     
     def __init__(self, db_manager: DatabaseManager, config: Config):
         self.db_manager = db_manager

@@ -495,16 +495,6 @@ class MessageProcessor:
                     'cleanup_required': True
                 }
                 
-            except Exception as download_error:
-                # Clean up on error
-                if temp_file and os.path.exists(temp_file):
-                    try:
-                        os.unlink(temp_file)
-                    except:
-                        pass
-                logger.error(f"Error downloading media: {download_error}")
-                return None
-                
         except Exception as e:
             logger.error(f"Error preparing media: {e}")
             return None
