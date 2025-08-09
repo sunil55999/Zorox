@@ -290,7 +290,7 @@ class ImageHandler:
             return []
     
     def add_text_watermark(self, input_path: str, output_path: str, text: str) -> bool:
-        """Add large semi-transparent text watermark positioned at 40% height with 60-70% width coverage"""
+        """Add dual-layer watermark with high visibility on any background"""
         if not self.enabled or not IMAGE_PROCESSING_AVAILABLE:
             logger.warning("[WATERMARK_DEBUG] Image processing not available, skipping watermark")
             return False
@@ -306,7 +306,7 @@ class ImageHandler:
                 logger.error(f"[WATERMARK_DEBUG] Input file is empty: {input_path}")
                 return False
             
-            logger.info(f"[WATERMARK_DEBUG] Processing watermark - Input: {input_path} ({input_size} bytes), Output: {output_path}, Text: '{text}'")
+            logger.info(f"[WATERMARK_DEBUG] Processing dual-layer watermark - Input: {input_path} ({input_size} bytes), Output: {output_path}, Text: '{text}'")
             
             # Open base image and convert to RGBA for transparency support
             try:
@@ -320,110 +320,100 @@ class ImageHandler:
             txt_layer = Image.new("RGBA", base.size, (255, 255, 255, 0))
             draw = ImageDraw.Draw(txt_layer)
             
-            # Calculate target watermark width (65% of image width)
-            target_width = int(base.width * 0.65)
-            
-            # Start with a base font size and iterate to find optimal size
-            font_size = max(int(base.width * 0.08), 20)  # Start larger
-            font = None
+            # Calculate font size as 7% of image width for better visibility
+            font_size = max(int(base.width * 0.07), 16)  # Minimum 16px font
             
             # Enhanced font loading with more sans-serif bold options
             font_paths = [
                 "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
                 "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
                 "/usr/share/fonts/truetype/noto/NotoSans-Bold.ttf",
+                "/System/Library/Fonts/Helvetica-Bold.ttc",
+                "/System/Library/Fonts/Arial-Bold.ttf",
                 "/System/Library/Fonts/Helvetica.ttc",
                 "/System/Library/Fonts/Arial.ttf", 
-                "/Windows/Fonts/arial.ttf",
                 "/Windows/Fonts/arialbd.ttf",  # Arial Bold
-                "/usr/share/fonts/TTF/arial.ttf",
-                "/usr/share/fonts/TTF/arialbd.ttf"
+                "/Windows/Fonts/arial.ttf",
+                "/usr/share/fonts/TTF/arialbd.ttf",
+                "/usr/share/fonts/TTF/arial.ttf"
             ]
             
-            # Initialize variables
-            text_width = target_width  # Default to target width
-            letter_spacing = 1
+            # Load font
+            font = None
+            for font_path in font_paths:
+                try:
+                    if os.path.exists(font_path):
+                        font = ImageFont.truetype(font_path, font_size)
+                        logger.info(f"[WATERMARK_DEBUG] Loaded font: {font_path} at size {font_size}")
+                        break
+                except Exception as e:
+                    logger.debug(f"Could not load font {font_path}: {e}")
+                    continue
             
-            # Find optimal font size to achieve target width
-            for attempt in range(10):  # Try up to 10 iterations
-                font = None
-                for font_path in font_paths:
-                    try:
-                        if os.path.exists(font_path):
-                            font = ImageFont.truetype(font_path, font_size)
-                            break
-                    except Exception as e:
-                        logger.debug(f"Could not load font {font_path}: {e}")
-                        continue
-                
-                # Use default font if no system font found
-                if font is None:
-                    try:
-                        font = ImageFont.load_default()
-                    except:
-                        logger.warning("Could not load any font, using basic text rendering")
-                        font = None
-                
-                # Measure text width with current font
-                if font:
-                    # Add letter spacing by measuring individual characters
-                    total_width = 0
-                    letter_spacing = max(int(font_size * 0.03), 1)  # 1-2px spacing relative to font size
-                    
-                    for i, char in enumerate(text):
-                        char_bbox = draw.textbbox((0, 0), char, font=font)
-                        char_width = char_bbox[2] - char_bbox[0]
-                        total_width += char_width
-                        if i < len(text) - 1:  # Add spacing except for last character
-                            total_width += letter_spacing
-                    
-                    text_width = total_width
-                else:
-                    # Estimate text size without font
-                    letter_spacing = max(int(font_size * 0.03), 1)
-                    text_width = len(text) * (font_size * 0.6) + (len(text) - 1) * letter_spacing
-                
-                # Check if we're close to target width (within 10%)
-                if abs(text_width - target_width) <= target_width * 0.1:
-                    break
-                
-                # Adjust font size
-                if text_width > target_width:
-                    font_size = int(font_size * 0.9)  # Reduce by 10%
-                else:
-                    font_size = int(font_size * 1.1)  # Increase by 10%
-                
-                # Prevent infinite loops with reasonable bounds
-                font_size = max(min(font_size, int(base.width * 0.2)), 12)
+            # Use default font if no system font found
+            if font is None:
+                try:
+                    font = ImageFont.load_default()
+                    logger.warning("[WATERMARK_DEBUG] Using default font")
+                except:
+                    logger.warning("[WATERMARK_DEBUG] Could not load any font, using basic text rendering")
+                    font = None
             
-            logger.info(f"[WATERMARK_DEBUG] Final font size: {font_size}, text width: {text_width}, target: {target_width}")
+            # Calculate text dimensions and letter spacing
+            letter_spacing = max(int(font_size * 0.04), 2)  # 2-4px spacing for better readability
             
-            # Get text height for positioning
             if font:
+                # Measure total text width with letter spacing
+                total_width = 0
+                for i, char in enumerate(text):
+                    char_bbox = draw.textbbox((0, 0), char, font=font)
+                    char_width = char_bbox[2] - char_bbox[0]
+                    total_width += char_width
+                    if i < len(text) - 1:  # Add spacing except for last character
+                        total_width += letter_spacing
+                
+                text_width = total_width
                 sample_bbox = draw.textbbox((0, 0), text, font=font)
                 text_height = sample_bbox[3] - sample_bbox[1]
             else:
+                # Estimate text size without font
+                text_width = len(text) * (font_size * 0.6) + (len(text) - 1) * letter_spacing
                 text_height = font_size
             
-            # Position watermark: center horizontally, 40% down vertically
+            # Position watermark: center horizontally, 60% down vertically (slightly below center)
             x = (base.width - text_width) // 2
-            y = int(base.height * 0.4) - (text_height // 2)
+            y = int(base.height * 0.6) - (text_height // 2)
             
-            # Light grey color with 25% opacity (RGB: 200,200,200, Alpha: ~64)
-            text_color = (200, 200, 200, 64)
+            logger.info(f"[WATERMARK_DEBUG] Font size: {font_size}, text dimensions: {text_width}x{text_height}, position: ({x}, {y})")
+            logger.info(f"[WATERMARK_DEBUG] Width coverage: {(text_width/base.width)*100:.1f}%")
             
-            # Draw text with letter spacing
+            # Draw dual-layer watermark for maximum visibility
             if font:
                 current_x = x
-                letter_spacing = max(int(font_size * 0.03), 1)
                 
+                # First pass: Draw shadow layer (semi-transparent black)
+                shadow_color = (0, 0, 0, 80)  # Black shadow with moderate opacity
                 for char in text:
-                    draw.text((current_x, y), char, font=font, fill=text_color)
+                    # Slight offset for shadow effect
+                    draw.text((current_x + 1, y + 1), char, font=font, fill=shadow_color)
+                    char_bbox = draw.textbbox((0, 0), char, font=font)
+                    char_width = char_bbox[2] - char_bbox[0]
+                    current_x += char_width + letter_spacing
+                
+                # Second pass: Draw main text layer (semi-transparent white)
+                current_x = x
+                main_color = (255, 255, 255, 100)  # White text with good opacity
+                for char in text:
+                    draw.text((current_x, y), char, font=font, fill=main_color)
                     char_bbox = draw.textbbox((0, 0), char, font=font)
                     char_width = char_bbox[2] - char_bbox[0]
                     current_x += char_width + letter_spacing
             else:
-                draw.text((x, y), text, fill=text_color)
+                # Fallback for basic text rendering
+                shadow_color = (0, 0, 0, 80)
+                main_color = (255, 255, 255, 100)
+                draw.text((x + 1, y + 1), text, fill=shadow_color)  # Shadow
+                draw.text((x, y), text, fill=main_color)  # Main text
             
             # Composite the layers with anti-aliasing preserved
             watermarked = Image.alpha_composite(base, txt_layer)
@@ -436,8 +426,8 @@ class ImageHandler:
                 # Verify output file was created and has content
                 if os.path.exists(output_path):
                     output_size = os.path.getsize(output_path)
-                    logger.info(f"[WATERMARK_DEBUG] Watermark completed successfully - Output: {output_path} ({output_size} bytes)")
-                    logger.info(f"[WATERMARK_DEBUG] Watermark specs - Width coverage: {(text_width/base.width)*100:.1f}%, Position: ({x}, {y}), Color: {text_color}")
+                    logger.info(f"[WATERMARK_DEBUG] Dual-layer watermark completed successfully - Output: {output_path} ({output_size} bytes)")
+                    logger.info(f"[WATERMARK_DEBUG] Final specs - Size: {font_size}px, Coverage: {(text_width/base.width)*100:.1f}%, Position: 60% vertical")
                     if output_size > 0:
                         return True
                     else:

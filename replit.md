@@ -8,15 +8,16 @@ This project is a comprehensive, production-ready Telegram message copying bot s
 #### Critical Watermarking Bug Fix
 Fixed critical watermarking bug that caused 34% error rate. Issue was in exception handling structure in `_download_and_prepare_media` function - media attribute extraction code was outside main try-catch block, causing silent failures after successful watermarking. Moved attribute extraction inside exception handling, resulting in 0% error rate and 100% success rate.
 
-#### Enhanced Watermarking System
-Updated `add_text_watermark` function with professional-grade watermarking capabilities:
-- **Size & Coverage**: Watermark now spans 60-70% of image width (65% target) with automatic scaling
-- **Positioning**: Moved to 40% vertical position (slightly above center) with horizontal centering
-- **Typography**: Enhanced sans-serif bold font loading with support for multiple system fonts (DejaVu, Liberation, Noto, Helvetica, Arial)
-- **Styling**: Light grey color (RGB: 200,200,200) with 25% opacity for subtle professional appearance
-- **Letter Spacing**: Dynamic 1-2px letter spacing proportional to font size for improved readability
-- **Smart Sizing**: Iterative font size optimization to achieve precise width coverage across different image resolutions
-- **Anti-aliasing**: Preserved smooth text rendering for professional quality output
+#### Dual-Layer Watermarking System
+Completely redesigned `add_text_watermark` function for maximum visibility on any background:
+- **Dual-Layer Design**: Semi-transparent black shadow layer (RGBA: 0,0,0,80) with white main text (RGBA: 255,255,255,100) ensures visibility on both light and dark backgrounds
+- **Proportional Sizing**: Font size set to 7% of image width for consistent appearance across all resolutions
+- **Optimal Positioning**: Horizontally centered at 60% vertical position (slightly below center) for ideal placement
+- **Typography**: Enhanced sans-serif bold font loading with priority for Arial, Helvetica, and fallback options
+- **Letter Spacing**: Dynamic 2-4px letter spacing for enhanced readability
+- **Universal Compatibility**: Works effectively on white, black, and mixed-color chart backgrounds
+- **Professional Quality**: Anti-aliased rendering with high-contrast dual-layer approach matching "Traders_Hive" reference standards
+- **Configurable Text**: Supports pair-specific watermark text (default: "@Forexinsider")
 
 ## User Preferences
 ```
