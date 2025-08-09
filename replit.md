@@ -3,8 +3,20 @@
 ## Overview
 This project is a comprehensive, production-ready Telegram message copying bot system. Its main purpose is to facilitate copying messages between Telegram channels/groups with advanced filtering capabilities, multi-bot support, and real-time monitoring. The system offers sophisticated filtering, duplicate detection, and load balancing across multiple bot instances, aiming for high reliability and efficiency in message replication.
 
-### Recent Critical Fix (Aug 9, 2025)
+### Recent Changes (Aug 9, 2025)
+
+#### Critical Watermarking Bug Fix
 Fixed critical watermarking bug that caused 34% error rate. Issue was in exception handling structure in `_download_and_prepare_media` function - media attribute extraction code was outside main try-catch block, causing silent failures after successful watermarking. Moved attribute extraction inside exception handling, resulting in 0% error rate and 100% success rate.
+
+#### Enhanced Watermarking System
+Updated `add_text_watermark` function with professional-grade watermarking capabilities:
+- **Size & Coverage**: Watermark now spans 60-70% of image width (65% target) with automatic scaling
+- **Positioning**: Moved to 40% vertical position (slightly above center) with horizontal centering
+- **Typography**: Enhanced sans-serif bold font loading with support for multiple system fonts (DejaVu, Liberation, Noto, Helvetica, Arial)
+- **Styling**: Light grey color (RGB: 200,200,200) with 25% opacity for subtle professional appearance
+- **Letter Spacing**: Dynamic 1-2px letter spacing proportional to font size for improved readability
+- **Smart Sizing**: Iterative font size optimization to achieve precise width coverage across different image resolutions
+- **Anti-aliasing**: Preserved smooth text rendering for professional quality output
 
 ## User Preferences
 ```
