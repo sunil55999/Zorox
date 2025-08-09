@@ -23,12 +23,13 @@ The system employs a modular, async-first, event-driven architecture designed fo
 - **Image Processing**: PIL and `imagehash`
 
 ### Key Components
-- **Bot Manager**: Orchestrates multiple Telegram bots, manages priority-based queues, handles load balancing, health monitoring, and ensures rate limit compliance.
+- **Bot Manager**: Orchestrates multiple Telegram bots, manages priority-based queues, handles load balancing, health monitoring, and ensures rate limit compliance. Now includes user management capabilities with mass kick/unban operations and subscription management.
 - **Message Processor**: Manages core message copying, including media handling, premium content, reply chain preservation, and real-time edit/delete synchronization. It also features entity-aware content transformation, improved header/footer/mention removal, and integrated image watermarking.
 - **Filter System**: Provides advanced message filtering based on words/phrases (including regex), media types (with perceptual hashing for duplicate images), time, and user. It supports entity preservation during text transformations.
-- **Database Manager**: Handles SQLite database operations for message pair management, message mapping, automatic backups, and statistics.
+- **Database Manager**: Handles SQLite database operations for message pair management, message mapping, automatic backups, statistics, and subscription tracking. Includes the new `user_subscriptions` table for timed access management.
 - **Image Handler**: Implements a comprehensive image blocking system using perceptual hashing for duplicate detection, manages block lists via bot commands, and provides text watermarking functionality with PIL/ImageDraw integration.
 - **Health Monitor**: Tracks system health, performance metrics, error rates, and resource usage.
+- **Subscription Manager**: Background service that automatically checks for expired subscriptions hourly and processes automatic user removal from all channels.
 
 ### Data Flow
 - **Message Processing**: Messages are received, filtered, processed for content transformation, added to a priority queue, delivered by an assigned bot, and finally, mapping and statistics are stored.
@@ -41,6 +42,8 @@ The system employs a modular, async-first, event-driven architecture designed fo
     - **Advanced Filtering**: Perceptual hash-based image blocking, word/phrase blocking (global and pair-specific), regex-based header/footer removal, and comprehensive mention removal.
     - **Image Watermarking**: Per-pair text watermarking for forwarded images with customizable text, semi-transparent overlay, and automatic scaling.
     - **Content Preservation**: Full support for preserving media, Telegram entities (formatting, custom emojis), and reply chains.
+    - **User Management**: Mass user kicking/unbanning across all channels with support for both user IDs and usernames.
+    - **Subscription Management**: Timed subscription system with automatic expiry-based kicking, subscription renewal, and comprehensive tracking.
     - **Scalability**: Optimized configuration for handling 100+ message forwarding pairs with increased workers, queue sizes, and connection pools.
     - **Security**: Secure token handling, access control via chat validation, and robust error isolation.
 

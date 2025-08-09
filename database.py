@@ -224,6 +224,18 @@ class DatabaseManager:
                 )
             ''')
 
+            # User subscriptions table for timed access management
+            await conn.execute('''
+                CREATE TABLE IF NOT EXISTS user_subscriptions (
+                    user_id INTEGER NOT NULL PRIMARY KEY,
+                    expires_at TEXT NOT NULL,
+                    added_by INTEGER,
+                    notes TEXT,
+                    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+
             # Create indexes for performance
             indexes = [
                 'CREATE INDEX IF NOT EXISTS idx_message_mapping_source ON message_mapping(source_message_id, pair_id)',
@@ -234,7 +246,9 @@ class DatabaseManager:
                 'CREATE INDEX IF NOT EXISTS idx_blocked_images_scope ON blocked_images(block_scope)',
                 'CREATE INDEX IF NOT EXISTS idx_error_logs_time ON error_logs(created_at DESC)',
                 'CREATE INDEX IF NOT EXISTS idx_pairs_status ON pairs(status)',
-                'CREATE INDEX IF NOT EXISTS idx_pairs_bot ON pairs(assigned_bot_index)'
+                'CREATE INDEX IF NOT EXISTS idx_pairs_bot ON pairs(assigned_bot_index)',
+                'CREATE INDEX IF NOT EXISTS idx_user_subscriptions_expires ON user_subscriptions(expires_at)',
+                'CREATE INDEX IF NOT EXISTS idx_user_subscriptions_user_id ON user_subscriptions(user_id)'
             ]
             
             for index_sql in indexes:
@@ -811,6 +825,124 @@ class DatabaseManager:
         except Exception as e:
             logger.error(f"Failed to toggle bot token status: {e}")
             return False
+
+    # Subscription management methods
+    async def get_all_unique_destinations(self) -> List[Tuple[int, Optional[int]]]:
+        """Get all unique destination_chat_id and bot_token_id from pairs"""
+        try:
+            async with self.get_connection() as conn:
+                cursor = await conn.execute('''
+                    SELECT DISTINCT destination_chat_id, bot_token_id
+                    FROM pairs 
+                    WHERE status = 'active'
+                ''')
+                rows = await cursor.fetchall()
+                return [(int(row[0]), row[1] if row[1] is not None else None) for row in rows]
+        except Exception as e:
+            logger.error(f"Failed to get unique destinations: {e}")
+            return []
+
+    async def get_bot_token_string_by_id(self, token_id: int) -> Optional[str]:
+        """Get bot token string by ID"""
+        try:
+            async with self.get_connection() as conn:
+                cursor = await conn.execute(
+                    "SELECT token FROM bot_tokens WHERE id = ? AND is_active = 1", 
+                    (token_id,)
+                )
+                row = await cursor.fetchone()
+                return row[0] if row else None
+        except Exception as e:
+            logger.error(f"Failed to get bot token by ID {token_id}: {e}")
+            return None
+
+    async def add_or_update_subscription(self, user_id: int, expires_at: str, added_by: int, notes: str = "") -> bool:
+        """Add or update user subscription"""
+        try:
+            async with self.get_connection() as conn:
+                await conn.execute('''
+                    INSERT OR REPLACE INTO user_subscriptions 
+                    (user_id, expires_at, added_by, notes, updated_at)
+                    VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+                ''', (user_id, expires_at, added_by, notes))
+                await conn.commit()
+                logger.info(f"Added/updated subscription for user {user_id}, expires at {expires_at}")
+                return True
+        except Exception as e:
+            logger.error(f"Failed to add/update subscription for user {user_id}: {e}")
+            return False
+
+    async def renew_subscription(self, user_id: int, days: int) -> bool:
+        """Extend subscription by specified days"""
+        try:
+            async with self.get_connection() as conn:
+                # Check if subscription exists
+                cursor = await conn.execute(
+                    "SELECT expires_at FROM user_subscriptions WHERE user_id = ?", 
+                    (user_id,)
+                )
+                row = await cursor.fetchone()
+                if not row:
+                    return False
+                
+                # Calculate new expiry date
+                current_expires = datetime.fromisoformat(row[0])
+                new_expires = current_expires + timedelta(days=days)
+                
+                await conn.execute('''
+                    UPDATE user_subscriptions 
+                    SET expires_at = ?, updated_at = CURRENT_TIMESTAMP
+                    WHERE user_id = ?
+                ''', (new_expires.isoformat(), user_id))
+                await conn.commit()
+                logger.info(f"Renewed subscription for user {user_id} by {days} days, new expiry: {new_expires}")
+                return True
+        except Exception as e:
+            logger.error(f"Failed to renew subscription for user {user_id}: {e}")
+            return False
+
+    async def get_expired_subscriptions(self, now: str) -> List[Tuple[int, str]]:
+        """Get users with expired subscriptions"""
+        try:
+            async with self.get_connection() as conn:
+                cursor = await conn.execute('''
+                    SELECT user_id, expires_at FROM user_subscriptions 
+                    WHERE expires_at <= ?
+                ''', (now,))
+                rows = await cursor.fetchall()
+                return [(int(row[0]), str(row[1])) for row in rows]
+        except Exception as e:
+            logger.error(f"Failed to get expired subscriptions: {e}")
+            return []
+
+    async def delete_subscription(self, user_id: int) -> bool:
+        """Delete user subscription"""
+        try:
+            async with self.get_connection() as conn:
+                cursor = await conn.execute(
+                    "DELETE FROM user_subscriptions WHERE user_id = ?", 
+                    (user_id,)
+                )
+                await conn.commit()
+                return cursor.rowcount > 0
+        except Exception as e:
+            logger.error(f"Failed to delete subscription for user {user_id}: {e}")
+            return False
+
+    async def get_active_subscriptions(self) -> List[Tuple[int, str, str, str]]:
+        """Get all active subscriptions with details"""
+        try:
+            async with self.get_connection() as conn:
+                cursor = await conn.execute('''
+                    SELECT user_id, expires_at, added_by, notes
+                    FROM user_subscriptions 
+                    ORDER BY expires_at ASC
+                ''')
+                rows = await cursor.fetchall()
+                return [(int(row[0]), str(row[1]), str(row[2]), str(row[3] or "")) for row in rows]
+        except Exception as e:
+            logger.error(f"Failed to get active subscriptions: {e}")
+            return []
 
     async def close(self):
         """Close database connections"""

@@ -7,7 +7,7 @@ import logging
 import time
 import json
 import traceback
-from typing import Dict, List, Optional, Any, Set
+from typing import Dict, List, Optional, Any, Set, Tuple
 from datetime import datetime, timedelta
 from dataclasses import dataclass, field
 from collections import defaultdict, deque
@@ -321,6 +321,13 @@ class BotManager:
         app.add_handler(CommandHandler("deletebot", self._cmd_delete_token))  # Alias for deletetoken
         app.add_handler(CommandHandler("toggletoken", self._cmd_toggle_token))
         app.add_handler(CommandHandler("togglebot", self._cmd_toggle_token))  # Alias for toggletoken
+
+        # User management and subscription commands
+        app.add_handler(CommandHandler("kickall", self._cmd_kick_all))
+        app.add_handler(CommandHandler("unbanall", self._cmd_unban_all))
+        app.add_handler(CommandHandler("addsub", self._cmd_add_subscription))
+        app.add_handler(CommandHandler("renewsub", self._cmd_renew_subscription))
+        app.add_handler(CommandHandler("listsubs", self._cmd_list_subscriptions))
         
         app.add_handler(CallbackQueryHandler(self._handle_callback))
     
@@ -377,7 +384,8 @@ class BotManager:
             monitoring_tasks = [
                 asyncio.create_task(self._health_monitor()),
                 asyncio.create_task(self._queue_monitor()),
-                asyncio.create_task(self._rate_limit_monitor())
+                asyncio.create_task(self._rate_limit_monitor()),
+                asyncio.create_task(self._subscription_expiry_checker())
             ]
             self.worker_tasks.extend(monitoring_tasks)
             
@@ -770,6 +778,45 @@ class BotManager:
                 
             except Exception as e:
                 logger.error(f"Rate limit monitor error: {e}")
+
+    async def _subscription_expiry_checker(self):
+        """Background task to check and process expired subscriptions"""
+        while self.running:
+            try:
+                # Run every hour
+                await asyncio.sleep(3600)
+                
+                now = datetime.now().isoformat()
+                expired_subscriptions = await self.db_manager.get_expired_subscriptions(now)
+                
+                if not expired_subscriptions:
+                    continue
+                
+                logger.info(f"Found {len(expired_subscriptions)} expired subscriptions to process")
+                
+                for user_id, expires_at in expired_subscriptions:
+                    try:
+                        logger.info(f"Processing expired subscription for user {user_id} (expired at {expires_at})")
+                        
+                        # Kick user from all channels using the same logic as /kickall
+                        success_count, total_count = await self._kick_user_from_channels(user_id)
+                        
+                        logger.info(f"Auto-kicked expired user {user_id} from {success_count}/{total_count} channels")
+                        
+                        # Remove the subscription from database
+                        await self.db_manager.delete_subscription(user_id)
+                        logger.info(f"Removed expired subscription for user {user_id}")
+                        
+                        # Small delay between processing users to avoid rate limits
+                        await asyncio.sleep(1)
+                        
+                    except Exception as e:
+                        logger.error(f"Error processing expired subscription for user {user_id}: {e}")
+                
+                logger.info("Completed processing expired subscriptions")
+                
+            except Exception as e:
+                logger.error(f"Subscription expiry checker error: {e}")
     
     async def _get_or_create_custom_bot(self, bot_token_id: int) -> Optional[Bot]:
         """Get or create a Bot instance for a specific bot_token_id"""
@@ -779,7 +826,7 @@ class BotManager:
                 return self.custom_bots[bot_token_id]
             
             # Get token from database
-            token_data = await self.db_manager.get_bot_token_by_id(bot_token_id)
+            token_data = await self.db_manager.get_bot_token_string_by_id(bot_token_id)
             if not token_data:
                 logger.error(f"Bot token {bot_token_id} not found in database")
                 return None
@@ -926,6 +973,19 @@ Utilities:
 Bot Token Management:
 /addtoken <name> <token> - Add new bot token
 /addbot <name> <token> - Add new bot token (alias)
+/listtokens - List all bot tokens
+/listbots - List all bot tokens (alias)
+/deletetoken <id> - Delete bot token
+/deletebot <id> - Delete bot token (alias)
+/toggletoken <id> - Toggle token active status
+/togglebot <id> - Toggle token active status (alias)
+
+User Management & Subscriptions:
+/kickall <user_id|@username> [duration_seconds] - Kick user from all channels
+/unbanall <user_id|@username> - Unban user from all channels
+/addsub <user_id|@username> <days> [notes] - Add user subscription
+/renewsub <user_id|@username> <days> - Renew existing subscription
+/listsubs - List all active subscriptions
 /listtokens [--all] - List bot tokens
 /listbots [--all] - List bot tokens (alias)  
 /deletetoken <token_id> - Delete bot token
@@ -1042,7 +1102,7 @@ Features:
                 bot_info = f"Bot: {pair.assigned_bot_index}"
                 if pair.bot_token_id:
                     try:
-                        token = await self.db_manager.get_bot_token_by_id(pair.bot_token_id)
+                        token = await self.db_manager.get_bot_token_string_by_id(pair.bot_token_id)
                         if token:
                             bot_info = f"Bot: {token['name']} (@{token['username']}, ID: {pair.bot_token_id})"
                     except:
@@ -1115,7 +1175,7 @@ Features:
                 try:
                     potential_token_id = int(context.args[3])
                     # Verify token exists and is active
-                    token = await self.db_manager.get_bot_token_by_id(potential_token_id)
+                    token = await self.db_manager.get_bot_token_string_by_id(potential_token_id)
                     if token and token['is_active']:
                         bot_token_id = potential_token_id
                         name = " ".join(context.args[2:3])  # Only take the name, not the token_id
@@ -1133,7 +1193,7 @@ Features:
             
             token_info = ""
             if bot_token_id:
-                token = await self.db_manager.get_bot_token_by_id(bot_token_id)
+                token = await self.db_manager.get_bot_token_string_by_id(bot_token_id)
                 token_info = f"\n🤖 Using bot: {token['name']} (@{token['username']})"
             
             await update.message.reply_text(
@@ -1292,7 +1352,7 @@ Features:
             bot_info = f"Assigned Bot: {pair.assigned_bot_index}"
             if pair.bot_token_id:
                 try:
-                    token = await self.db_manager.get_bot_token_by_id(pair.bot_token_id)
+                    token = await self.db_manager.get_bot_token_string_by_id(pair.bot_token_id)
                     if token:
                         bot_info = f"Bot Token: {token['name']} (@{token['username']}, ID: {pair.bot_token_id})"
                     else:
@@ -2368,7 +2428,7 @@ Use `/cleanup --force` to proceed with cleanup.
             token_id = int(context.args[0])
             
             # Check if token exists
-            token = await self.db_manager.get_bot_token_by_id(token_id)
+            token = await self.db_manager.get_bot_token_string_by_id(token_id)
             if not token:
                 await update.message.reply_text("❌ Token not found.")
                 return
@@ -2401,7 +2461,7 @@ Use `/cleanup --force` to proceed with cleanup.
             token_id = int(context.args[0])
             
             # Check if token exists
-            token = await self.db_manager.get_bot_token_by_id(token_id)
+            token = await self.db_manager.get_bot_token_string_by_id(token_id)
             if not token:
                 await update.message.reply_text("❌ Token not found.")
                 return
@@ -2421,3 +2481,334 @@ Use `/cleanup --force` to proceed with cleanup.
             await update.message.reply_text("❌ Invalid token ID. Please use a number.")
         except Exception as e:
             await update.message.reply_text(f"❌ Error toggling token: {e}")
+
+    # User management and subscription command implementations
+    async def _resolve_user_id(self, user_input: str) -> Optional[int]:
+        """Resolve user ID from username or numeric ID using Telethon"""
+        try:
+            # If it's already a number, return it
+            if user_input.isdigit():
+                return int(user_input)
+            
+            # Remove @ if present
+            username = user_input.lstrip('@')
+            
+            if self.telethon_client and self.telethon_client.is_connected():
+                try:
+                    entity = await self.telethon_client.get_entity(username)
+                    return entity.id
+                except Exception as e:
+                    logger.warning(f"Failed to resolve username {username}: {e}")
+                    return None
+        except Exception as e:
+            logger.error(f"Error resolving user ID for {user_input}: {e}")
+        return None
+
+    async def _kick_user_from_channels(self, user_id: int, duration_seconds: Optional[int] = None) -> Tuple[int, int]:
+        """Kick user from all channels, returns (success_count, total_count)"""
+        destinations = await self.db_manager.get_all_unique_destinations()
+        success_count = 0
+        total_count = len(destinations)
+        
+        for dest_chat_id, bot_token_id in destinations:
+            try:
+                # Get the appropriate bot token
+                if bot_token_id:
+                    bot_token = await self.db_manager.get_bot_token_string_by_id(bot_token_id)
+                    if not bot_token:
+                        logger.warning(f"Bot token {bot_token_id} not found for channel {dest_chat_id}")
+                        continue
+                    bot = Bot(token=bot_token)
+                else:
+                    # Use the first available bot if no specific bot is assigned
+                    if not self.telegram_bots:
+                        logger.warning("No bots available for kicking")
+                        continue
+                    bot = self.telegram_bots[0]
+                
+                # Kick the user
+                await bot.ban_chat_member(chat_id=dest_chat_id, user_id=user_id)
+                success_count += 1
+                logger.info(f"Successfully kicked user {user_id} from channel {dest_chat_id}")
+                
+                # If duration is specified, schedule unban
+                if duration_seconds:
+                    asyncio.create_task(self._schedule_unban(bot, dest_chat_id, user_id, duration_seconds))
+                
+                # Small delay to avoid rate limiting
+                await asyncio.sleep(0.1)
+                
+            except Exception as e:
+                logger.error(f"Failed to kick user {user_id} from channel {dest_chat_id}: {e}")
+        
+        return success_count, total_count
+
+    async def _schedule_unban(self, bot: Bot, chat_id: int, user_id: int, delay_seconds: int):
+        """Schedule an unban after specified delay"""
+        try:
+            await asyncio.sleep(delay_seconds)
+            await bot.unban_chat_member(chat_id=chat_id, user_id=user_id)
+            logger.info(f"Successfully unbanned user {user_id} from channel {chat_id} after {delay_seconds} seconds")
+        except Exception as e:
+            logger.error(f"Failed to unban user {user_id} from channel {chat_id}: {e}")
+
+    async def _unban_user_from_channels(self, user_id: int) -> Tuple[int, int]:
+        """Unban user from all channels, returns (success_count, total_count)"""
+        destinations = await self.db_manager.get_all_unique_destinations()
+        success_count = 0
+        total_count = len(destinations)
+        
+        for dest_chat_id, bot_token_id in destinations:
+            try:
+                # Get the appropriate bot token
+                if bot_token_id:
+                    bot_token = await self.db_manager.get_bot_token_string_by_id(bot_token_id)
+                    if not bot_token:
+                        logger.warning(f"Bot token {bot_token_id} not found for channel {dest_chat_id}")
+                        continue
+                    bot = Bot(token=bot_token)
+                else:
+                    # Use the first available bot if no specific bot is assigned
+                    if not self.telegram_bots:
+                        logger.warning("No bots available for unbanning")
+                        continue
+                    bot = self.telegram_bots[0]
+                
+                # Unban the user
+                await bot.unban_chat_member(chat_id=dest_chat_id, user_id=user_id)
+                success_count += 1
+                logger.info(f"Successfully unbanned user {user_id} from channel {dest_chat_id}")
+                
+                # Small delay to avoid rate limiting
+                await asyncio.sleep(0.1)
+                
+            except Exception as e:
+                logger.error(f"Failed to unban user {user_id} from channel {dest_chat_id}: {e}")
+        
+        return success_count, total_count
+
+    async def _cmd_kick_all(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Admin command: /kickall <user_id|@username> [duration_seconds]"""
+        if not update.effective_user or not self._is_admin(update.effective_user.id):
+            return
+
+        try:
+            if len(context.args) < 1:
+                await update.message.reply_text(
+                    "Usage: /kickall <user_id|@username> [duration_seconds]\n"
+                    "Examples:\n"
+                    "• /kickall 123456789\n"
+                    "• /kickall @username\n"
+                    "• /kickall 123456789 3600  # kick for 1 hour"
+                )
+                return
+
+            user_input = context.args[0]
+            duration_seconds = int(context.args[1]) if len(context.args) > 1 else None
+
+            # Resolve user ID
+            user_id = await self._resolve_user_id(user_input)
+            if not user_id:
+                await update.message.reply_text("❌ Could not resolve user ID from the provided input.")
+                return
+
+            await update.message.reply_text(f"🔄 Kicking user {user_id} from all channels...")
+
+            # Kick user from all channels
+            success_count, total_count = await self._kick_user_from_channels(user_id, duration_seconds)
+
+            duration_text = f" for {duration_seconds} seconds" if duration_seconds else ""
+            await update.message.reply_text(
+                f"✅ Kicked user {user_id} from {success_count}/{total_count} channels{duration_text}."
+            )
+
+        except ValueError:
+            await update.message.reply_text("❌ Invalid duration. Please use a number for seconds.")
+        except Exception as e:
+            await update.message.reply_text(f"❌ Error during mass kick: {e}")
+            logger.error(f"Error in kickall command: {e}")
+
+    async def _cmd_unban_all(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Admin command: /unbanall <user_id|@username>"""
+        if not update.effective_user or not self._is_admin(update.effective_user.id):
+            return
+
+        try:
+            if len(context.args) < 1:
+                await update.message.reply_text(
+                    "Usage: /unbanall <user_id|@username>\n"
+                    "Examples:\n"
+                    "• /unbanall 123456789\n"
+                    "• /unbanall @username"
+                )
+                return
+
+            user_input = context.args[0]
+
+            # Resolve user ID
+            user_id = await self._resolve_user_id(user_input)
+            if not user_id:
+                await update.message.reply_text("❌ Could not resolve user ID from the provided input.")
+                return
+
+            await update.message.reply_text(f"🔄 Unbanning user {user_id} from all channels...")
+
+            # Unban user from all channels
+            success_count, total_count = await self._unban_user_from_channels(user_id)
+
+            await update.message.reply_text(
+                f"✅ Unbanned user {user_id} from {success_count}/{total_count} channels."
+            )
+
+        except Exception as e:
+            await update.message.reply_text(f"❌ Error during mass unban: {e}")
+            logger.error(f"Error in unbanall command: {e}")
+
+    async def _cmd_add_subscription(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Admin command: /addsub <user_id|@username> <days>"""
+        if not update.effective_user or not self._is_admin(update.effective_user.id):
+            return
+
+        try:
+            if len(context.args) < 2:
+                await update.message.reply_text(
+                    "Usage: /addsub <user_id|@username> <days> [notes]\n"
+                    "Examples:\n"
+                    "• /addsub 123456789 30\n"
+                    "• /addsub @username 7 Premium trial"
+                )
+                return
+
+            user_input = context.args[0]
+            days = int(context.args[1])
+            notes = " ".join(context.args[2:]) if len(context.args) > 2 else ""
+
+            # Resolve user ID
+            user_id = await self._resolve_user_id(user_input)
+            if not user_id:
+                await update.message.reply_text("❌ Could not resolve user ID from the provided input.")
+                return
+
+            # Calculate expiry date
+            expires_at = (datetime.now() + timedelta(days=days)).isoformat()
+
+            # Add subscription
+            success = await self.db_manager.add_or_update_subscription(
+                user_id=user_id,
+                expires_at=expires_at,
+                added_by=update.effective_user.id,
+                notes=notes
+            )
+
+            if success:
+                await update.message.reply_text(
+                    f"✅ Added subscription for user {user_id}\n"
+                    f"Duration: {days} days\n"
+                    f"Expires: {expires_at[:19].replace('T', ' ')}\n"
+                    f"Notes: {notes if notes else 'None'}"
+                )
+            else:
+                await update.message.reply_text("❌ Failed to add subscription.")
+
+        except ValueError:
+            await update.message.reply_text("❌ Invalid number of days. Please use a number.")
+        except Exception as e:
+            await update.message.reply_text(f"❌ Error adding subscription: {e}")
+            logger.error(f"Error in addsub command: {e}")
+
+    async def _cmd_renew_subscription(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Admin command: /renewsub <user_id|@username> <days>"""
+        if not update.effective_user or not self._is_admin(update.effective_user.id):
+            return
+
+        try:
+            if len(context.args) < 2:
+                await update.message.reply_text(
+                    "Usage: /renewsub <user_id|@username> <days>\n"
+                    "Examples:\n"
+                    "• /renewsub 123456789 30\n"
+                    "• /renewsub @username 7"
+                )
+                return
+
+            user_input = context.args[0]
+            days = int(context.args[1])
+
+            # Resolve user ID
+            user_id = await self._resolve_user_id(user_input)
+            if not user_id:
+                await update.message.reply_text("❌ Could not resolve user ID from the provided input.")
+                return
+
+            # Renew subscription
+            success = await self.db_manager.renew_subscription(user_id, days)
+
+            if success:
+                await update.message.reply_text(
+                    f"✅ Renewed subscription for user {user_id} by {days} days."
+                )
+            else:
+                await update.message.reply_text(
+                    f"❌ Failed to renew subscription. User {user_id} may not have an existing subscription."
+                )
+
+        except ValueError:
+            await update.message.reply_text("❌ Invalid number of days. Please use a number.")
+        except Exception as e:
+            await update.message.reply_text(f"❌ Error renewing subscription: {e}")
+            logger.error(f"Error in renewsub command: {e}")
+
+    async def _cmd_list_subscriptions(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Admin command: /listsubs"""
+        if not update.effective_user or not self._is_admin(update.effective_user.id):
+            return
+
+        try:
+            subscriptions = await self.db_manager.get_active_subscriptions()
+
+            if not subscriptions:
+                await update.message.reply_text("📋 No active subscriptions found.")
+                return
+
+            message = "📋 **Active Subscriptions:**\n\n"
+            now = datetime.now()
+
+            for user_id, expires_at, added_by, notes in subscriptions:
+                try:
+                    expiry_date = datetime.fromisoformat(expires_at)
+                    time_left = expiry_date - now
+                    
+                    if time_left.total_seconds() > 0:
+                        days_left = time_left.days
+                        hours_left = time_left.seconds // 3600
+                        status = f"{days_left}d {hours_left}h remaining"
+                        status_emoji = "🟢" if days_left > 3 else "🟡" if days_left > 0 else "🔴"
+                    else:
+                        status = "EXPIRED"
+                        status_emoji = "🔴"
+
+                    message += f"{status_emoji} **User {user_id}**\n"
+                    message += f"   Expires: {expires_at[:19].replace('T', ' ')}\n"
+                    message += f"   Status: {status}\n"
+                    if notes:
+                        message += f"   Notes: {notes}\n"
+                    message += "\n"
+
+                except Exception as e:
+                    logger.error(f"Error processing subscription for user {user_id}: {e}")
+                    continue
+
+            # Split message if too long
+            if len(message) > 4000:
+                parts = [message[i:i+4000] for i in range(0, len(message), 4000)]
+                for i, part in enumerate(parts):
+                    if i == 0:
+                        await update.message.reply_text(part, parse_mode='Markdown')
+                    else:
+                        await update.message.reply_text(f"(continued)\n{part}", parse_mode='Markdown')
+            else:
+                await update.message.reply_text(message, parse_mode='Markdown')
+
+        except Exception as e:
+            await update.message.reply_text(f"❌ Error listing subscriptions: {e}")
+            logger.error(f"Error in listsubs command: {e}")
