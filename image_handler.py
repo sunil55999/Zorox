@@ -292,12 +292,29 @@ class ImageHandler:
     def add_text_watermark(self, input_path: str, output_path: str, text: str) -> bool:
         """Add semi-transparent text watermark to image center"""
         if not self.enabled or not IMAGE_PROCESSING_AVAILABLE:
-            logger.warning("Image processing not available, skipping watermark")
+            logger.warning("[WATERMARK_DEBUG] Image processing not available, skipping watermark")
             return False
         
         try:
+            # Verify input file exists and has content
+            if not os.path.exists(input_path):
+                logger.error(f"[WATERMARK_DEBUG] Input file does not exist: {input_path}")
+                return False
+            
+            input_size = os.path.getsize(input_path)
+            if input_size == 0:
+                logger.error(f"[WATERMARK_DEBUG] Input file is empty: {input_path}")
+                return False
+            
+            logger.info(f"[WATERMARK_DEBUG] Processing watermark - Input: {input_path} ({input_size} bytes), Output: {output_path}, Text: '{text}'")
+            
             # Open base image and convert to RGBA for transparency support
-            base = Image.open(input_path).convert("RGBA")
+            try:
+                base = Image.open(input_path).convert("RGBA")
+                logger.info(f"[WATERMARK_DEBUG] Image opened successfully - Size: {base.size}, Mode: {base.mode}")
+            except Exception as open_error:
+                logger.error(f"[WATERMARK_DEBUG] Failed to open image: {open_error}")
+                return False
             
             # Create transparent overlay layer
             txt_layer = Image.new("RGBA", base.size, (255, 255, 255, 0))
@@ -352,14 +369,31 @@ class ImageHandler:
             watermarked = Image.alpha_composite(base, txt_layer)
             
             # Convert back to RGB and save as JPEG
-            final_image = watermarked.convert("RGB")
-            final_image.save(output_path, "JPEG", quality=95)
-            
-            logger.debug(f"Added watermark '{text}' to image: {input_path} -> {output_path}")
-            return True
+            try:
+                final_image = watermarked.convert("RGB")
+                final_image.save(output_path, "JPEG", quality=95)
+                
+                # Verify output file was created and has content
+                if os.path.exists(output_path):
+                    output_size = os.path.getsize(output_path)
+                    logger.info(f"[WATERMARK_DEBUG] Watermark completed successfully - Output: {output_path} ({output_size} bytes)")
+                    if output_size > 0:
+                        return True
+                    else:
+                        logger.error(f"[WATERMARK_DEBUG] Output file is empty: {output_path}")
+                        return False
+                else:
+                    logger.error(f"[WATERMARK_DEBUG] Output file not created: {output_path}")
+                    return False
+                    
+            except Exception as save_error:
+                logger.error(f"[WATERMARK_DEBUG] Failed to save watermarked image: {save_error}")
+                return False
             
         except Exception as e:
-            logger.error(f"Failed to add watermark: {e}")
+            import traceback
+            logger.error(f"[WATERMARK_DEBUG] Watermark failed with exception: {e}")
+            logger.error(f"[WATERMARK_DEBUG] Full traceback: {traceback.format_exc()}")
             return False
     
     async def cleanup_unused_blocks(self, days: int = 30):

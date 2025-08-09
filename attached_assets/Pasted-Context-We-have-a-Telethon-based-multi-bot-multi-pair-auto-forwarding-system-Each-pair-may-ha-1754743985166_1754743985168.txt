@@ -1,0 +1,50 @@
+Context:
+We have a Telethon-based multi-bot, multi-pair auto-forwarding system.
+- Each pair may have filters (header/footer removal, watermark).
+- Media is downloaded, optionally modified, and sent via Bot API.
+- Current logs show 34% error rate during media processing.
+- Success rate drops mainly when watermark or header/footer filters are applied.
+- The health monitor reports CRITICAL status.
+
+Goal:
+Diagnose root cause of watermark/header-footer failures, focusing on:
+1. Whether media processing is failing for specific formats (JPEG, PNG, WEBP, GIF, MP4, documents).
+2. Whether the Pillow-based watermark code throws exceptions for certain files.
+3. Whether entity-preservation logic in `filters.py` skips modifications incorrectly.
+4. Whether temporary files are missing or inaccessible after download.
+5. Whether the forwarded media is incompatible with Telegram Bot API send methods.
+
+Tasks for AI Agent:
+1. **Log Enhancements**
+   - Add debug logs before and after each major media step:
+     a. Download start & end (file path, size, mime type).
+     b. Watermark start & end (success/fail, processing time).
+     c. File existence & size after watermark step.
+     d. Bot API send result (success/fail with error code).
+   - Log exceptions with full traceback.
+
+2. **Reproduce Issue in Isolation**
+   - Pick 5 failing messages from logs.
+   - Re-run only the watermarking step on these files.
+   - Log if Pillow fails to open/modify file.
+   - Check if failure correlates to specific mime types (e.g., webp, animated).
+
+3. **Temporary File Handling**
+   - Verify watermark writes to a valid temp path before sending.
+   - Add `os.path.exists()` and `os.path.getsize()` checks.
+   - If output is 0 bytes, skip sending and log.
+
+4. **Entity Preservation Logic**
+   - In `filters.py`, confirm whether regex removal and watermark logic are skipped when `message.entities` exists.
+   - If so, modify so watermark can still run without corrupting formatting.
+
+5. **Error Capture**
+   - Ensure all exceptions in watermark + send steps are caught and logged without skipping queue processing.
+   - Record error type & affected pair_id for correlation.
+
+6. **Output**
+   - At the end of test run, print:
+     - Failures by media type
+     - Failures by processing stage
+     - Average processing time per stage
+     - Any pattern in failing channels/pairs

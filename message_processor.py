@@ -400,28 +400,41 @@ class MessageProcessor:
     
     async def _download_and_prepare_media(self, event, pair: MessagePair, bot: Bot) -> Optional[Dict]:
         """Download media via Telethon and prepare for Bot API sending"""
+        import time
+        start_time = time.time()
+        
         try:
-            # Apply media filters if needed  
-            # Note: Media filtering is handled in the main process flow
-            # We'll keep this simple and focus on download/prepare
-            
-            # Get media type for proper handling
+            # Get media type and MIME type for logging
             media_type = self._get_message_type(event)
+            mime_type = None
+            if hasattr(event.media, 'document') and event.media.document:
+                mime_type = getattr(event.media.document, 'mime_type', 'unknown')
+            
+            logger.info(f"[MEDIA_DEBUG] Starting media processing - Type: {media_type}, MIME: {mime_type}, Pair: {pair.id}")
+            
             if media_type == "text":
                 return None
             
             # Create a temporary file for download
             temp_file = None
+            download_start = time.time()
             try:
                 # Download media to temporary file
                 temp_file = await event.download_media(file=tempfile.mktemp())
+                download_time = time.time() - download_start
+                
                 if not temp_file or not os.path.exists(temp_file):
-                    logger.error("Failed to download media")
+                    logger.error(f"[MEDIA_DEBUG] Download failed - no file created, Pair: {pair.id}")
                     return None
+                
+                file_size = os.path.getsize(temp_file) if os.path.exists(temp_file) else 0
+                logger.info(f"[MEDIA_DEBUG] Download completed - File: {temp_file}, Size: {file_size} bytes, Time: {download_time:.2f}s, Pair: {pair.id}")
                 
                 # Check if watermarking is enabled for this pair and if this is an image
                 watermark_enabled = pair.filters.get("watermark_enabled", False)
                 watermark_text = pair.filters.get("watermark_text", "")
+                
+                logger.info(f"[MEDIA_DEBUG] Watermark check - Enabled: {watermark_enabled}, Text: '{watermark_text}', Type: {media_type}, Pair: {pair.id}")
                 
                 # Apply watermark if enabled and media is an image
                 if watermark_enabled and watermark_text and media_type in ['photo', 'document']:
@@ -430,22 +443,45 @@ class MessageProcessor:
                     if media_type == 'document' and hasattr(event.media, 'document') and event.media.document:
                         mime_type = getattr(event.media.document, 'mime_type', '').lower()
                         is_image = mime_type.startswith('image/')
+                        logger.info(f"[MEDIA_DEBUG] Document MIME check - MIME: {mime_type}, Is Image: {is_image}, Pair: {pair.id}")
                     
                     if is_image:
                         # Apply watermark
+                        watermark_start = time.time()
                         watermarked_file = temp_file.replace(os.path.splitext(temp_file)[1], "_watermarked.jpg")
+                        
+                        logger.info(f"[MEDIA_DEBUG] Starting watermark - Input: {temp_file}, Output: {watermarked_file}, Text: '{watermark_text}', Pair: {pair.id}")
+                        
                         success = self.image_handler.add_text_watermark(temp_file, watermarked_file, watermark_text)
+                        watermark_time = time.time() - watermark_start
                         
                         if success:
-                            # Clean up original file and use watermarked version
-                            try:
-                                os.unlink(temp_file)
-                            except:
-                                pass
-                            temp_file = watermarked_file
-                            logger.debug(f"Applied watermark to image for pair {pair.id}")
+                            # Verify watermarked file exists and has content
+                            if os.path.exists(watermarked_file):
+                                watermarked_size = os.path.getsize(watermarked_file)
+                                logger.info(f"[MEDIA_DEBUG] Watermark success - Size: {watermarked_size} bytes, Time: {watermark_time:.2f}s, Pair: {pair.id}")
+                                
+                                if watermarked_size > 0:
+                                    # Clean up original file and use watermarked version
+                                    try:
+                                        os.unlink(temp_file)
+                                    except Exception as cleanup_error:
+                                        logger.warning(f"[MEDIA_DEBUG] Failed to cleanup original file: {cleanup_error}")
+                                    temp_file = watermarked_file
+                                else:
+                                    logger.error(f"[MEDIA_DEBUG] Watermarked file is empty - Size: 0 bytes, Pair: {pair.id}")
+                                    try:
+                                        os.unlink(watermarked_file)
+                                    except:
+                                        pass
+                            else:
+                                logger.error(f"[MEDIA_DEBUG] Watermarked file not created - Path: {watermarked_file}, Pair: {pair.id}")
                         else:
-                            logger.warning(f"Failed to apply watermark to image for pair {pair.id}")
+                            logger.error(f"[MEDIA_DEBUG] Watermark failed - Time: {watermark_time:.2f}s, Pair: {pair.id}")
+                    else:
+                        logger.info(f"[MEDIA_DEBUG] Skipping watermark - not an image, Type: {media_type}, MIME: {mime_type}, Pair: {pair.id}")
+                else:
+                    logger.info(f"[MEDIA_DEBUG] Skipping watermark - conditions not met, Pair: {pair.id}")
                 
             except Exception as download_error:
                 # Clean up on error
@@ -454,7 +490,9 @@ class MessageProcessor:
                         os.unlink(temp_file)
                     except:
                         pass
-                logger.error(f"Error downloading media: {download_error}")
+                import traceback
+                logger.error(f"[MEDIA_DEBUG] Error during media download/processing - Pair: {pair.id}, Type: {media_type}, Error: {download_error}")
+                logger.error(f"[MEDIA_DEBUG] Full traceback: {traceback.format_exc()}")
                 return None
                 
                 # Extract media attributes safely
@@ -521,7 +559,12 @@ class MessageProcessor:
                           media_info: Optional[Dict], reply_to_message_id: Optional[int] = None,
                           entities: Optional[List] = None):
         """Send message to destination chat with comprehensive media and formatting support"""
+        import time
+        send_start = time.time()
+        
         try:
+            logger.info(f"[SEND_DEBUG] Starting message send - Chat: {chat_id}, Content length: {len(content) if content else 0}, Media: {media_info['type'] if media_info else None}")
+            
             # Validate and convert entities for proper formatting and premium emoji support  
             converted_entities = self._validate_and_convert_entities(content, entities or [])
             
@@ -554,34 +597,55 @@ class MessageProcessor:
                 
                 media_type = media_info['type']
                 file_path = media_info.get('file_path')
+                file_size = os.path.getsize(file_path) if file_path and os.path.exists(file_path) else 0
+                
+                logger.info(f"[SEND_DEBUG] Media send prep - Type: {media_type}, File: {file_path}, Size: {file_size} bytes")
                 
                 if not file_path or not os.path.exists(file_path):
-                    logger.error("Media file path is invalid or file doesn't exist")
+                    logger.error(f"[SEND_DEBUG] Media file missing - Path: {file_path}, Exists: {os.path.exists(file_path) if file_path else False}")
+                    return None
+                
+                if file_size == 0:
+                    logger.error(f"[SEND_DEBUG] Media file is empty - Path: {file_path}")
                     return None
                 
                 try:
                     # Send based on media type with all attributes preserved
                     if media_type == 'photo':
-                        with open(file_path, 'rb') as photo_file:
-                            result = await bot.send_photo(
-                                chat_id=chat_id,
-                                photo=photo_file,
-                                caption=caption,
-                                caption_entities=caption_entities,
-                                reply_to_message_id=reply_to_message_id
-                            )
+                        logger.info(f"[SEND_DEBUG] Sending photo - Size: {file_size} bytes, Caption: {len(caption) if caption else 0} chars")
+                        try:
+                            with open(file_path, 'rb') as photo_file:
+                                result = await bot.send_photo(
+                                    chat_id=chat_id,
+                                    photo=photo_file,
+                                    caption=caption,
+                                    caption_entities=caption_entities,
+                                    reply_to_message_id=reply_to_message_id
+                                )
+                                send_time = time.time() - send_start
+                                logger.info(f"[SEND_DEBUG] Photo sent successfully - Message ID: {result.message_id}, Time: {send_time:.2f}s")
+                        except Exception as photo_error:
+                            logger.error(f"[SEND_DEBUG] Photo send failed: {photo_error}")
+                            raise photo_error
                     elif media_type == 'video':
-                        with open(file_path, 'rb') as video_file:
-                            result = await bot.send_video(
-                                chat_id=chat_id,
-                                video=video_file,
-                                caption=caption,
-                                caption_entities=caption_entities,
-                                duration=media_info.get('duration'),
-                                width=media_info.get('width'),
-                                height=media_info.get('height'),
-                                reply_to_message_id=reply_to_message_id
-                            )
+                        logger.info(f"[SEND_DEBUG] Sending video - Size: {file_size} bytes, Duration: {media_info.get('duration')}")
+                        try:
+                            with open(file_path, 'rb') as video_file:
+                                result = await bot.send_video(
+                                    chat_id=chat_id,
+                                    video=video_file,
+                                    caption=caption,
+                                    caption_entities=caption_entities,
+                                    duration=media_info.get('duration'),
+                                    width=media_info.get('width'),
+                                    height=media_info.get('height'),
+                                    reply_to_message_id=reply_to_message_id
+                                )
+                                send_time = time.time() - send_start
+                                logger.info(f"[SEND_DEBUG] Video sent successfully - Message ID: {result.message_id}, Time: {send_time:.2f}s")
+                        except Exception as video_error:
+                            logger.error(f"[SEND_DEBUG] Video send failed: {video_error}")
+                            raise video_error
                     elif media_type == 'animation':
                         with open(file_path, 'rb') as animation_file:
                             result = await bot.send_animation(
