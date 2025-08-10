@@ -3,9 +3,12 @@
 ## Overview
 This project is a comprehensive, production-ready Telegram message copying bot system. Its main purpose is to facilitate copying messages between Telegram channels/groups with advanced filtering capabilities, multi-bot support, and real-time monitoring. The system offers sophisticated filtering, duplicate detection, and load balancing across multiple bot instances, aiming for high reliability and efficiency in message replication.
 
-### Recent Changes (Aug 9, 2025)
+### Recent Changes (Aug 10, 2025)
 
-#### Critical Watermarking Bug Fix
+#### Word Blocking Function Fix
+Fixed word blocking functions to use whole-word matching instead of substring matching. Previously, blocked words would trigger even when they appeared as part of other words (e.g., blocking "cat" would also block "category"). Updated both `_check_global_word_blocks` and `_contains_blocked_words` functions to use regex word boundaries (`\b`) for precise word matching. Added logging to track when word blocks are triggered for better debugging.
+
+#### Critical Watermarking Bug Fix (Aug 9, 2025)
 Fixed critical watermarking bug that caused 34% error rate. Issue was in exception handling structure in `_download_and_prepare_media` function - media attribute extraction code was outside main try-catch block, causing silent failures after successful watermarking. Moved attribute extraction inside exception handling, resulting in 0% error rate and 100% success rate.
 
 #### Dual-Layer Watermarking System

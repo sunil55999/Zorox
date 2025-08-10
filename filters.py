@@ -221,15 +221,17 @@ class MessageFilter:
             return text, entities or []
     
     async def _check_global_word_blocks(self, text: str) -> bool:
-        """Check against global blocked words"""
+        """Check against global blocked words using whole-word matching"""
         try:
             global_words = self.global_blocks.get("words", [])
             if not global_words:
                 return False
             
-            text_lower = text.lower()
             for word in global_words:
-                if word.lower() in text_lower:
+                # Use regex word boundaries to match whole words only
+                pattern = r'\b' + re.escape(word.lower()) + r'\b'
+                if re.search(pattern, text.lower()):
+                    logger.info(f"Global word block triggered by: '{word}' in text: '{text[:100]}...'")
                     return True
             
             return False
@@ -239,13 +241,15 @@ class MessageFilter:
             return False
     
     def _contains_blocked_words(self, text: str, blocked_words: List[str]) -> bool:
-        """Check if text contains any blocked words"""
+        """Check if text contains any blocked words using whole-word matching"""
         if not blocked_words:
             return False
         
-        text_lower = text.lower()
         for word in blocked_words:
-            if word.lower() in text_lower:
+            # Use regex word boundaries to match whole words only
+            pattern = r'\b' + re.escape(word.lower()) + r'\b'
+            if re.search(pattern, text.lower()):
+                logger.info(f"Pair-specific word block triggered by: '{word}' in text: '{text[:100]}...'")
                 return True
         
         return False
