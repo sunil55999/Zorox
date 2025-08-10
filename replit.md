@@ -5,6 +5,9 @@ This project is a comprehensive, production-ready Telegram message copying bot s
 
 ### Recent Changes (Aug 10, 2025)
 
+#### /addpair Command Fix & Help Update
+Fixed the `/addpair` command that was causing "string indices must be integers, not 'str'" error. The issue was using `get_bot_token_string_by_id` which returns only a string, instead of `get_bot_token_by_id` which returns the full token dictionary with `is_active`, `name`, and `username` fields. Updated help command with clearer examples and current feature list including recent fixes.
+
 #### Word Blocking Function Fix
 Fixed word blocking functions to use whole-word matching instead of substring matching. Previously, blocked words would trigger even when they appeared as part of other words (e.g., blocking "cat" would also block "category"). Updated both `_check_global_word_blocks` and `_contains_blocked_words` functions to use regex word boundaries (`\b`) for precise word matching. Added logging to track when word blocks are triggered for better debugging.
 

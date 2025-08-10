@@ -929,10 +929,14 @@ System Management:
 
 Pair Management:
 /pairs - List all message pairs
-/addpair <source> <dest> <name> [bot_token_id] - Add new pair with optional bot selection
+/addpair <source_chat_id> <dest_chat_id> <name> [bot_token_id] - Add new pair
 /delpair <id> - Delete pair
 /editpair <id> <setting> <value> - Edit pair settings
 /pairinfo <id> - Detailed pair information
+
+Examples:
+  /addpair -1002846119767 -1002761601205 "My Channel" 1
+  Use /listtokens to see available bot token IDs
 
 Bot Management:
 /bots - List all bot instances
@@ -987,23 +991,22 @@ User Management & Subscriptions:
 /addsub <user_id|@username> <days> [notes] - Add user subscription
 /renewsub <user_id|@username> <days> - Renew existing subscription
 /listsubs - List all active subscriptions
-/listtokens [--all] - List bot tokens
-/listbots [--all] - List bot tokens (alias)  
-/deletetoken <token_id> - Delete bot token
-/deletebot <token_id> - Delete bot token (alias)
-/toggletoken <token_id> - Enable/disable bot token
-/togglebot <token_id> - Enable/disable bot token (alias)
 
 Features:
 ✅ Multi-bot support with load balancing
 ✅ Bot token management via commands
-✅ Advanced message filtering with word/image blocking
+✅ Advanced message filtering with whole-word blocking
 ✅ Real-time synchronization with premium emoji support
-✅ Image duplicate detection and processing
+✅ Image duplicate detection and watermarking
 ✅ Reply preservation and webpage preview handling
 ✅ Edit/delete sync with formatting preservation
 ✅ Mention removal and header/footer regex filtering
-✅ Comprehensive statistics and auto-cleanup"""
+✅ User subscription management with auto-expiry
+✅ Comprehensive statistics and auto-cleanup
+
+Recent Fixes:
+🔧 Word blocking now uses precise whole-word matching
+🔧 Fixed /addpair command with proper bot token validation"""
         
         await update.message.reply_text(help_text, parse_mode=None)
     
@@ -1176,7 +1179,7 @@ Features:
                 try:
                     potential_token_id = int(context.args[3])
                     # Verify token exists and is active
-                    token = await self.db_manager.get_bot_token_string_by_id(potential_token_id)
+                    token = await self.db_manager.get_bot_token_by_id(potential_token_id)
                     if token and token['is_active']:
                         bot_token_id = potential_token_id
                         name = " ".join(context.args[2:3])  # Only take the name, not the token_id
@@ -1194,8 +1197,9 @@ Features:
             
             token_info = ""
             if bot_token_id:
-                token = await self.db_manager.get_bot_token_string_by_id(bot_token_id)
-                token_info = f"\n🤖 Using bot: {token['name']} (@{token['username']})"
+                token = await self.db_manager.get_bot_token_by_id(bot_token_id)
+                if token:
+                    token_info = f"\n🤖 Using bot: {token['name']} (@{token['username']})"
             
             await update.message.reply_text(
                 f"✅ Created pair {pair_id}: {name}\n"
