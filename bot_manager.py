@@ -290,6 +290,7 @@ class BotManager:
         app.add_handler(CommandHandler("logs", self._cmd_logs))
         app.add_handler(CommandHandler("errors", self._cmd_errors))
         app.add_handler(CommandHandler("diagnostics", self._cmd_diagnostics))
+        app.add_handler(CommandHandler("checkaccess", self._cmd_check_access))
         
         # Settings
         app.add_handler(CommandHandler("settings", self._cmd_settings))
@@ -826,7 +827,7 @@ class BotManager:
                 return self.custom_bots[bot_token_id]
             
             # Get token from database
-            token_data = await self.db_manager.get_bot_token_string_by_id(bot_token_id)
+            token_data = await self.db_manager.get_bot_token_by_id(bot_token_id)
             if not token_data:
                 logger.error(f"Bot token {bot_token_id} not found in database")
                 return None
@@ -951,6 +952,7 @@ Logs & Diagnostics:
 /logs [limit] - View recent log entries
 /errors [limit] - View recent errors
 /diagnostics - Run system diagnostics
+/checkaccess [pair_id] - Check bot access to configured chats
 
 Settings:
 /settings - View current settings
@@ -1006,7 +1008,9 @@ Features:
 
 Recent Fixes:
 🔧 Word blocking now uses precise whole-word matching
-🔧 Fixed /addpair command with proper bot token validation"""
+🔧 Fixed /addpair command with proper bot token validation
+🔧 Fixed custom bot token retrieval causing "Chat not found" errors
+🔧 Added /checkaccess command to diagnose chat access issues"""
         
         await update.message.reply_text(help_text, parse_mode=None)
     
@@ -1357,7 +1361,7 @@ Recent Fixes:
             bot_info = f"Assigned Bot: {pair.assigned_bot_index}"
             if pair.bot_token_id:
                 try:
-                    token = await self.db_manager.get_bot_token_string_by_id(pair.bot_token_id)
+                    token = await self.db_manager.get_bot_token_by_id(pair.bot_token_id)
                     if token:
                         bot_info = f"Bot Token: {token['name']} (@{token['username']}, ID: {pair.bot_token_id})"
                     else:
@@ -2866,3 +2870,103 @@ Use `/cleanup --force` to proceed with cleanup.
         except Exception as e:
             await update.message.reply_text(f"❌ Error listing subscriptions: {e}")
             logger.error(f"Error in listsubs command: {e}")
+
+    async def _cmd_check_access(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Check if bots can access the chats configured in pairs"""
+        if not self._is_admin(update.effective_user.id):
+            return
+
+        try:
+            if context.args and context.args[0].isdigit():
+                # Check specific pair
+                pair_id = int(context.args[0])
+                if pair_id not in self.pairs:
+                    await update.message.reply_text("❌ Pair not found.")
+                    return
+                pairs_to_check = [self.pairs[pair_id]]
+            else:
+                # Check all pairs
+                pairs_to_check = list(self.pairs.values())
+
+            if not pairs_to_check:
+                await update.message.reply_text("📋 No pairs configured.")
+                return
+
+            message = "🔍 **Chat Access Check:**\n\n"
+            issues_found = []
+
+            for pair in pairs_to_check:
+                message += f"**Pair {pair.id}: {pair.name}**\n"
+                message += f"Source: `{pair.source_chat_id}`\n"
+                message += f"Destination: `{pair.destination_chat_id}`\n"
+
+                # Determine which bot to use
+                bot = None
+                bot_name = "Unknown"
+                
+                if pair.bot_token_id:
+                    # Use custom bot token
+                    try:
+                        custom_token = await self.db_manager.get_bot_token_by_id(pair.bot_token_id)
+                        if custom_token and custom_token['is_active']:
+                            bot = await self._get_or_create_custom_bot(pair.bot_token_id)
+                            bot_name = custom_token['name']
+                            message += f"Bot: {bot_name} (Custom)\n"
+                        else:
+                            message += f"❌ Custom bot token {pair.bot_token_id} not found/inactive\n"
+                            issues_found.append(f"Pair {pair.id}: Custom bot token issue")
+                            continue
+                    except Exception as e:
+                        message += f"❌ Error loading custom bot: {e}\n"
+                        continue
+                else:
+                    # Use default bot
+                    if self.telegram_bots:
+                        bot = self.telegram_bots[0]
+                        bot_name = "Default Bot"
+                        message += f"Bot: {bot_name}\n"
+                    else:
+                        message += f"❌ No default bots available\n"
+                        continue
+
+                # Test access to both chats
+                if bot:
+                    # Test source chat
+                    try:
+                        source_chat = await bot.get_chat(pair.source_chat_id)
+                        message += f"✅ Source: {source_chat.title}\n"
+                    except Exception as e:
+                        message += f"⚠️ Source access issue: {str(e)[:50]}...\n"
+
+                    # Test destination chat
+                    try:
+                        dest_chat = await bot.get_chat(pair.destination_chat_id)
+                        message += f"✅ Destination: {dest_chat.title}\n"
+                    except Exception as e:
+                        message += f"❌ **Destination access failed**: {str(e)[:50]}...\n"
+                        if "Chat not found" in str(e):
+                            message += f"   → **This is causing forwarding failures!**\n"
+                            message += f"   → Add bot to destination chat\n"
+                            issues_found.append(f"Pair {pair.id}: Bot not in destination chat")
+
+                message += "\n"
+
+            # Add summary
+            if issues_found:
+                message += "⚠️ **Issues Found:**\n"
+                for issue in issues_found:
+                    message += f"• {issue}\n"
+            else:
+                message += "✅ All configured pairs have proper bot access"
+
+            # Split long messages
+            if len(message) > 4000:
+                parts = [message[i:i+4000] for i in range(0, len(message), 4000)]
+                for i, part in enumerate(parts):
+                    await update.message.reply_text(part, parse_mode='Markdown')
+            else:
+                await update.message.reply_text(message, parse_mode='Markdown')
+
+        except Exception as e:
+            await update.message.reply_text(f"❌ Error checking chat access: {e}")
+            logger.error(f"Error in checkaccess command: {e}")

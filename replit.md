@@ -5,6 +5,9 @@ This project is a comprehensive, production-ready Telegram message copying bot s
 
 ### Recent Changes (Aug 10, 2025)
 
+#### Message Forwarding "Chat Not Found" Error Fix
+Identified and resolved critical issue preventing message forwarding for new pairs with custom bot tokens. Root cause was inconsistent bot token retrieval method in `_get_or_create_custom_bot` function - was using `get_bot_token_string_by_id` (returns string) but trying to access dictionary properties like `is_active` and `token`. Fixed by using correct `get_bot_token_by_id` method. Added comprehensive diagnostic logging and new `/checkaccess` command to help users identify and resolve bot chat access issues.
+
 #### /addpair Command Fix & Help Update
 Fixed the `/addpair` command that was causing "string indices must be integers, not 'str'" error. The issue was using `get_bot_token_string_by_id` which returns only a string, instead of `get_bot_token_by_id` which returns the full token dictionary with `is_active`, `name`, and `username` fields. Updated help command with clearer examples and current feature list including recent fixes.
 

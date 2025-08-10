@@ -769,6 +769,20 @@ class MessageProcessor:
             logger.error(f"Bot forbidden in chat {chat_id}: {e}")
             return None
         except BadRequest as e:
+            logger.error(f"Bad request sending message to chat {chat_id}: {e}")
+            
+            # Check if it's a "Chat not found" error - this usually means:
+            # 1. The bot is not a member of the destination chat
+            # 2. The chat ID is incorrect
+            # 3. The chat was deleted or made private
+            if "Chat not found" in str(e):
+                logger.error(f"CHAT ACCESS ERROR for pair with destination {chat_id}:")
+                logger.error(f"  - Bot might not be a member of the destination chat")
+                logger.error(f"  - Chat ID might be incorrect: {chat_id}")
+                logger.error(f"  - Chat might be private or deleted")
+                logger.error(f"  - Solution: Add the bot to the destination chat or check the chat ID")
+                return None
+            
             logger.warning(f"Bad request sending message, trying fallback: {e}")
             # Comprehensive fallback strategy
             try:
