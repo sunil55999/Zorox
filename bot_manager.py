@@ -1,2972 +1,1406 @@
 """
-Bot Manager - Handles multiple Telegram bots with load balancing
+Message Processor - Handles message filtering and copying logic
 """
 
 import asyncio
 import logging
+import os
+import re
+import tempfile
 import time
-import json
-import traceback
-from typing import Dict, List, Optional, Any, Set, Tuple
-from datetime import datetime, timedelta
-from dataclasses import dataclass, field
-from collections import defaultdict, deque
-from enum import Enum
-import heapq
+from typing import Dict, List, Optional, Any, Tuple
+from io import BytesIO
+from datetime import datetime
 
-from telegram import Bot, Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
-from telegram.error import RetryAfter, TelegramError, NetworkError, TimedOut, Forbidden, BadRequest
-from telegram.request import HTTPXRequest
-from telethon import TelegramClient, events
-from telethon.errors import FloodWaitError, AuthKeyUnregisteredError
+from telegram import Bot, InputMediaPhoto, InputMediaVideo, InputMediaDocument, MessageEntity, InputFile
+from telegram.error import TelegramError, BadRequest, Forbidden
+from telethon.tl.types import (
+    MessageMediaPhoto, MessageMediaDocument
+)
 
 from database import DatabaseManager, MessagePair, MessageMapping
-from message_processor import MessageProcessor
+from filters import MessageFilter
+from image_handler import ImageHandler
+from topic_manager import TopicManager
 from config import Config
 
 logger = logging.getLogger(__name__)
 
-class MessagePriority(Enum):
-    """Message priority levels"""
-    URGENT = 4
-    HIGH = 3
-    NORMAL = 2
-    LOW = 1
-
-    def __lt__(self, other):
-        return self.value < other.value
-
-@dataclass
-class QueuedMessage:
-    """Queued message with priority and metadata"""
-    data: dict
-    priority: MessagePriority
-    timestamp: float
-    pair_id: int
-    bot_index: int
-    retry_count: int = 0
-    max_retries: int = 3
-    processing_time_estimate: float = 1.0
-
-    def __lt__(self, other):
-        if self.priority.value != other.priority.value:
-            return self.priority.value > other.priority.value
-        return self.timestamp < other.timestamp
-
-@dataclass
-class BotMetrics:
-    """Bot performance metrics"""
-    messages_processed: int = 0
-    success_rate: float = 1.0
-    avg_processing_time: float = 1.0
-    current_load: int = 0
-    error_count: int = 0
-    last_activity: float = 0
-    rate_limit_until: float = 0
-    consecutive_failures: int = 0
-    
-    def update_success_rate(self, success: bool):
-        """Update success rate with exponential moving average"""
-        alpha = 0.1  # Learning rate
-        new_rate = 1.0 if success else 0.0
-        self.success_rate = alpha * new_rate + (1 - alpha) * self.success_rate
-        
-        if success:
-            self.consecutive_failures = 0
-        else:
-            self.consecutive_failures += 1
-
-class BotManager:
-    """Production-ready bot manager with advanced features"""
+class MessageProcessor:
+    """Advanced message processor with filtering and media handling"""
     
     def __init__(self, db_manager: DatabaseManager, config: Config):
         self.db_manager = db_manager
         self.config = config
-        self.message_processor = MessageProcessor(db_manager, config)
+        self.message_filter = MessageFilter(db_manager, config)
+        self.image_handler = ImageHandler(db_manager, config)
+        self.topic_manager = TopicManager(db_manager, config)
         
-        # Bot instances
-        self.telegram_bots: List[Bot] = []
-        self.bot_applications: List[Application] = []
-        self.admin_bot: Optional[Bot] = None
-        self.admin_application: Optional[Application] = None
-        self.telethon_client: Optional[TelegramClient] = None
-        
-        # Initialize filter and image handler from message processor
-        self.message_filter = self.message_processor.message_filter
-        self.image_handler = self.message_processor.image_handler
-        
-        # Monitoring and metrics
-        self.bot_metrics: Dict[int, BotMetrics] = {}
-        self.message_queue = asyncio.PriorityQueue(maxsize=config.MESSAGE_QUEUE_SIZE)
-        self.pair_queues: Dict[int, deque] = defaultdict(lambda: deque(maxlen=100))
-        
-        # Rate limiting
-        self.rate_limiters: Dict[int, deque] = defaultdict(lambda: deque(maxlen=config.RATE_LIMIT_MESSAGES))
-        
-        # System state
-        self.running = False
-        self.worker_tasks: List[asyncio.Task] = []
-        self.pairs: Dict[int, MessagePair] = {}
-        self.source_to_pairs: Dict[int, List[int]] = defaultdict(list)
-        
-        # Custom bot instances cache for saved bot tokens
-        self.custom_bots: Dict[int, Bot] = {}  # token_id -> Bot instance
-        
-        # Error tracking
-        self.global_error_count = 0
-        self.last_error_time = 0
-        
+        # Processing statistics
+        self.stats = {
+            'messages_processed': 0,
+            'messages_copied': 0,
+            'messages_filtered': 0,
+            'errors': 0,
+            'media_processed': 0
+        }
+    
     async def initialize(self):
-        """Initialize all bot components"""
-        try:
-            # Initialize bots
-            await self._init_telegram_bots()
-            await self._init_telethon_client()
-            
-            # Initialize message processor
-            await self.message_processor.initialize()
-            
-            # Load pairs from database
-            await self._load_pairs()
-            
-            # Initialize metrics
-            for i in range(len(self.telegram_bots)):
-                self.bot_metrics[i] = BotMetrics()
-            
-            logger.info(f"Bot manager initialized with {len(self.telegram_bots)} bots")
-            
-        except Exception as e:
-            logger.error(f"Failed to initialize bot manager: {e}")
-            raise
+        """Initialize message processor components"""
+        await self.message_filter.initialize()
+        await self.topic_manager.initialize()
     
-    async def _init_telegram_bots(self):
-        """Initialize Telegram bot instances"""
+    async def process_new_message(self, event, pair: MessagePair, bot: Bot, bot_index: int) -> bool:
+        """Process new message from source chat with enhanced formatting and media support"""
         try:
-            # Import required modules with proper async support
-            from telegram.request import HTTPXRequest
+            self.stats['messages_processed'] += 1
             
-            # Create a custom HTTP request handler with proper asyncio support
-            request = HTTPXRequest(
-                connection_pool_size=8,
-                read_timeout=30,
-                write_timeout=30,
-                connect_timeout=30,
-                pool_timeout=30
-            )
-            
-            # Initialize admin bot first if configured
-            if self.config.ADMIN_BOT_TOKEN:
-                self.admin_bot = Bot(token=self.config.ADMIN_BOT_TOKEN, request=request)
-                
-                # Test admin bot connectivity with retry
-                max_retries = 3
-                for attempt in range(max_retries):
-                    try:
-                        me = await self.admin_bot.get_me()
-                        logger.info(f"Admin bot initialized: @{me.username}")
-                        break
-                    except Exception as e:
-                        if attempt == max_retries - 1:
-                            raise
-                        logger.warning(f"Admin bot connection attempt {attempt + 1} failed: {e}")
-                        await asyncio.sleep(2)
-                
-                # Create admin application for commands
-                self.admin_application = Application.builder().token(self.config.ADMIN_BOT_TOKEN).request(request).build()
-                await self._setup_command_handlers(self.admin_application)
-                logger.info("Admin bot command handlers configured")
-            
-            # Initialize message sending bots
-            for i, token in enumerate(self.config.BOT_TOKENS):
-                try:
-                    # Create bot with custom request handler
-                    bot = Bot(token=token, request=request)
-                    
-                    # Test bot connectivity with retry
-                    max_retries = 3
-                    for attempt in range(max_retries):
-                        try:
-                            bot_info = await bot.get_me()
-                            logger.info(f"Bot {i} initialized: @{bot_info.username}")
-                            break
-                        except Exception as e:
-                            if attempt == max_retries - 1:
-                                logger.error(f"Bot {i} failed after {max_retries} attempts: {e}")
-                                continue  # Skip this bot but continue with others
-                            logger.warning(f"Bot {i} connection attempt {attempt + 1} failed: {e}")
-                            await asyncio.sleep(2)
-                    else:
-                        # If all retries failed, skip this bot
-                        continue
-                    
-                    self.telegram_bots.append(bot)
-                    
-                    # Create application for message sending (no commands on these)
-                    app = Application.builder().token(token).request(request).build()
-                    self.bot_applications.append(app)
-                    
-                except Exception as e:
-                    logger.error(f"Failed to initialize bot {i}: {e}")
-                    # Continue with other bots
-            
-            if not self.telegram_bots:
-                raise ValueError("No Telegram bots could be initialized successfully")
-                
-        except Exception as e:
-            logger.error(f"Failed to initialize bots: {e}")
-            raise
-    
-    async def _init_telethon_client(self):
-        """Initialize Telethon client for message listening"""
-        try:
-            # Validate required configuration
-            if not self.config.API_ID or not self.config.API_HASH or not self.config.PHONE_NUMBER:
-                raise ValueError("Missing required Telethon configuration: API_ID, API_HASH, or PHONE_NUMBER")
-            
-            api_id = int(self.config.API_ID) if isinstance(self.config.API_ID, str) else self.config.API_ID
-            
-            self.telethon_client = TelegramClient(
-                'session_bot',
-                api_id,
-                self.config.API_HASH
-            )
-            
-            if self.telethon_client and not self.telethon_client.is_connected():
-                await self.telethon_client.start(phone=self.config.PHONE_NUMBER)
-            logger.info("Telethon client initialized")
-            
-            # Setup message handlers
-            self.telethon_client.add_event_handler(
-                self._handle_new_message,
-                events.NewMessage()
-            )
-            
-            self.telethon_client.add_event_handler(
-                self._handle_message_edited,
-                events.MessageEdited()
-            )
-            
-            self.telethon_client.add_event_handler(
-                self._handle_message_deleted,
-                events.MessageDeleted()
-            )
-            
-        except Exception as e:
-            logger.error(f"Failed to initialize Telethon client: {e}")
-            raise
-    
-    async def _setup_command_handlers(self, app: Application):
-        """Setup command handlers for primary bot"""
-        # Basic commands
-        app.add_handler(CommandHandler("start", self._cmd_start))
-        app.add_handler(CommandHandler("help", self._cmd_help))
-        
-        # System management
-        app.add_handler(CommandHandler("status", self._cmd_status))
-        app.add_handler(CommandHandler("stats", self._cmd_stats))
-        app.add_handler(CommandHandler("health", self._cmd_health))
-        app.add_handler(CommandHandler("pause", self._cmd_pause))
-        app.add_handler(CommandHandler("resume", self._cmd_resume))
-        app.add_handler(CommandHandler("restart", self._cmd_restart))
-        
-        # Pair management
-        app.add_handler(CommandHandler("pairs", self._cmd_pairs))
-        app.add_handler(CommandHandler("addpair", self._cmd_add_pair))
-        app.add_handler(CommandHandler("delpair", self._cmd_delete_pair))
-        app.add_handler(CommandHandler("editpair", self._cmd_edit_pair))
-        app.add_handler(CommandHandler("pairinfo", self._cmd_pair_info))
-        
-        # Bot management
-        app.add_handler(CommandHandler("bots", self._cmd_bots))
-        app.add_handler(CommandHandler("botinfo", self._cmd_bot_info))
-        app.add_handler(CommandHandler("rebalance", self._cmd_rebalance))
-        
-        # Queue management
-        app.add_handler(CommandHandler("queue", self._cmd_queue))
-        app.add_handler(CommandHandler("clearqueue", self._cmd_clear_queue))
-        
-        # Logs and diagnostics
-        app.add_handler(CommandHandler("logs", self._cmd_logs))
-        app.add_handler(CommandHandler("errors", self._cmd_errors))
-        app.add_handler(CommandHandler("diagnostics", self._cmd_diagnostics))
-        app.add_handler(CommandHandler("checkaccess", self._cmd_check_access))
-        
-        # Settings
-        app.add_handler(CommandHandler("settings", self._cmd_settings))
-        app.add_handler(CommandHandler("set", self._cmd_set_setting))
-        
-        # Utilities
-        app.add_handler(CommandHandler("backup", self._cmd_backup))
-        app.add_handler(CommandHandler("cleanup", self._cmd_cleanup))
-        
-        # Advanced filtering commands
-        app.add_handler(CommandHandler("blockword", self._cmd_block_word))
-        app.add_handler(CommandHandler("unblockword", self._cmd_unblock_word))
-        app.add_handler(CommandHandler("listblocked", self._cmd_list_blocked_words))
-        app.add_handler(CommandHandler("blockimage", self._cmd_block_image))
-        app.add_handler(CommandHandler("unblockimage", self._cmd_unblock_image))
-        app.add_handler(CommandHandler("listblockedimages", self._cmd_list_blocked_images))
-        app.add_handler(CommandHandler("mentions", self._cmd_set_mention_removal))
-        app.add_handler(CommandHandler("headerregex", self._cmd_set_header_regex))
-        app.add_handler(CommandHandler("footerregex", self._cmd_set_footer_regex))
-        app.add_handler(CommandHandler("watermark", self._cmd_watermark))
-        app.add_handler(CommandHandler("testfilter", self._cmd_test_filter))
-        
-        # Bot token management commands
-        app.add_handler(CommandHandler("addtoken", self._cmd_add_token))
-        app.add_handler(CommandHandler("addbot", self._cmd_add_token))  # Alias for addtoken
-        app.add_handler(CommandHandler("listtokens", self._cmd_list_tokens))
-        app.add_handler(CommandHandler("listbots", self._cmd_list_tokens))  # Alias for listtokens
-        app.add_handler(CommandHandler("deletetoken", self._cmd_delete_token))
-        app.add_handler(CommandHandler("deletebot", self._cmd_delete_token))  # Alias for deletetoken
-        app.add_handler(CommandHandler("toggletoken", self._cmd_toggle_token))
-        app.add_handler(CommandHandler("togglebot", self._cmd_toggle_token))  # Alias for toggletoken
-
-        # User management and subscription commands
-        app.add_handler(CommandHandler("kickall", self._cmd_kick_all))
-        app.add_handler(CommandHandler("unbanall", self._cmd_unban_all))
-        app.add_handler(CommandHandler("addsub", self._cmd_add_subscription))
-        app.add_handler(CommandHandler("renewsub", self._cmd_renew_subscription))
-        app.add_handler(CommandHandler("listsubs", self._cmd_list_subscriptions))
-        
-        app.add_handler(CallbackQueryHandler(self._handle_callback))
-    
-    async def _load_pairs(self):
-        """Load message pairs from database"""
-        try:
-            pairs = await self.db_manager.get_all_pairs()
-            self.pairs = {pair.id: pair for pair in pairs}
-            
-            # Build optimized source chat mapping for fast lookups
-            self.source_to_pairs.clear()
-            for pair in pairs:
-                if pair.status == "active":
-                    if pair.source_chat_id not in self.source_to_pairs:
-                        self.source_to_pairs[pair.source_chat_id] = []
-                    self.source_to_pairs[pair.source_chat_id].append(pair.id)
-            
-            logger.info(f"Loaded {len(pairs)} pairs from database")
-            
-        except Exception as e:
-            logger.error(f"Failed to load pairs: {e}")
-            raise
-    
-    async def start(self):
-        """Start bot manager and all components"""
-        try:
-            self.running = True
-            
-            # Start admin bot application if available
-            if self.admin_application:
-                await self.admin_application.initialize()
-                await self.admin_application.start()
-                logger.info("Started admin bot application")
-                
-                # Start polling for admin bot to receive commands
-                if self.admin_application.updater:
-                    admin_task = asyncio.create_task(self.admin_application.updater.start_polling())
-                    self.worker_tasks.append(admin_task)
-                    logger.info("Started admin bot polling")
-            
-            # Start message sending bot applications
-            for i, app in enumerate(self.bot_applications):
-                await app.initialize()
-                await app.start()
-                logger.info(f"Started bot application {i}")
-            
-            # Start worker tasks
-            for i in range(self.config.MAX_WORKERS):
-                task = asyncio.create_task(self._message_worker(i))
-                self.worker_tasks.append(task)
-                logger.info(f"Message worker {i} started")
-            
-            # Start monitoring tasks
-            monitoring_tasks = [
-                asyncio.create_task(self._health_monitor()),
-                asyncio.create_task(self._queue_monitor()),
-                asyncio.create_task(self._rate_limit_monitor()),
-                asyncio.create_task(self._subscription_expiry_checker())
-            ]
-            self.worker_tasks.extend(monitoring_tasks)
-            
-            logger.info("Bot manager started successfully")
-            
-        except Exception as e:
-            logger.error(f"Failed to start bot manager: {e}")
-            raise
-    
-    async def stop(self):
-        """Stop bot manager and cleanup"""
-        try:
-            self.running = False
-            
-            # Cancel worker tasks
-            for task in self.worker_tasks:
-                task.cancel()
-            
-            # Wait for tasks to complete
-            if self.worker_tasks:
-                await asyncio.gather(*self.worker_tasks, return_exceptions=True)
-            
-            # Stop admin bot application
-            if self.admin_application and self.admin_application.running:
-                await self.admin_application.stop()
-                await self.admin_application.shutdown()
-            
-            # Stop bot applications
-            for app in self.bot_applications:
-                if app.running:
-                    await app.stop()
-                    await app.shutdown()
-            
-            # Disconnect Telethon client
-            if self.telethon_client and self.telethon_client.is_connected():
-                await self.telethon_client.disconnect()
-            
-            # Clear custom bot instances cache
-            self.custom_bots.clear()
-            
-            logger.info("Bot manager stopped")
-            
-        except Exception as e:
-            logger.error(f"Error stopping bot manager: {e}")
-    
-    async def _handle_new_message(self, event):
-        """Handle new messages from Telethon"""
-        try:
-            chat_id = event.chat_id
-            
-            # Check if this chat has active pairs
-            if chat_id not in self.source_to_pairs:
-                return
-            
-            # Log URL messages for debugging
+            # Check global and pair-specific word blocking first
             message_text = event.text or event.raw_text or ""
-            if self.message_processor._contains_urls(message_text):
-                logger.info(f"New URL message received: {message_text[:100]}...")
+            if self.is_blocked_word(message_text, pair):
+                logger.info(f"Message blocked by word filter (pair {pair.id}): {message_text[:100]}...")
+                self.stats['messages_filtered'] += 1
+                pair.stats['messages_filtered'] = pair.stats.get('messages_filtered', 0) + 1
+                pair.stats['words_blocked'] = pair.stats.get('words_blocked', 0) + 1
+                await self.db_manager.update_pair(pair)
+                return True
             
-            # Process message for each pair
-            for pair_id in self.source_to_pairs[chat_id]:
-                pair = self.pairs.get(pair_id)
-                if not pair or pair.status != "active":
-                    continue
+            # Apply other filters
+            filter_result = await self.message_filter.should_copy_message(event, pair)
+            if not filter_result.should_copy:
+                logger.info(f"Message filtered by {filter_result.filters_applied}: {filter_result.reason} - Content: {message_text[:100]}...")
+                self.stats['messages_filtered'] += 1
                 
-                # Create message data
-                message_data = {
-                    'type': 'new_message',
-                    'event': event,
-                    'pair_id': pair_id,
-                    'timestamp': time.time()
-                }
-                
-                # Determine priority
-                priority = self._get_message_priority(event, pair)
-                
-                # Queue message
-                await self._queue_message(message_data, priority, pair_id, pair.assigned_bot_index)
-        
-        except Exception as e:
-            logger.error(f"Error handling new message: {e}")
-            await self._log_error("message_handling", str(e), traceback.format_exc())
-    
-    async def _handle_message_edited(self, event):
-        """Handle message edits"""
-        try:
-            chat_id = event.chat_id
+                # Update pair stats
+                pair.stats['messages_filtered'] = pair.stats.get('messages_filtered', 0) + 1
+                await self.db_manager.update_pair(pair)
+                return True  # Successfully filtered (not an error)
             
-            if chat_id not in self.source_to_pairs:
-                return
+            # Handle replies first
+            reply_to_message_id = None
+            if event.is_reply and pair.filters.get("preserve_replies", True):
+                reply_to_message_id = await self._find_reply_target(event, pair)
             
-            for pair_id in self.source_to_pairs[chat_id]:
-                pair = self.pairs.get(pair_id)
-                if not pair or pair.status != "active":
-                    continue
-                
-                if not pair.filters.get("sync_edits", True):
-                    continue
-                
-                message_data = {
-                    'type': 'edit_message',
-                    'event': event,
-                    'pair_id': pair_id,
-                    'timestamp': time.time()
-                }
-                
-                await self._queue_message(message_data, MessagePriority.HIGH, pair_id, pair.assigned_bot_index)
-        
-        except Exception as e:
-            logger.error(f"Error handling message edit: {e}")
-    
-    async def _handle_message_deleted(self, event):
-        """Handle message deletions"""
-        try:
-            chat_id = event.chat_id
+            # Always use Bot API for consistent sender appearance (not direct forwarding)
+            # Process message content with entities (preserve original formatting)
+            processed_content, processed_entities = await self._process_message_content(event, pair)
             
-            if chat_id not in self.source_to_pairs:
-                return
+            # Handle media if present - download via Telethon and send via Bot API
+            media_info = None
+            if event.media:
+                # Check image blocking before processing
+                if await self.is_blocked_image(event, pair):
+                    logger.debug("Message blocked: contains blocked image")
+                    self.stats['messages_filtered'] += 1
+                    pair.stats['messages_filtered'] = pair.stats.get('messages_filtered', 0) + 1
+                    pair.stats['images_blocked'] = pair.stats.get('images_blocked', 0) + 1
+                    await self.db_manager.update_pair(pair)
+                    return True
+                
+                media_info = await self._download_and_prepare_media(event, pair, bot)
+                logger.info(f"[MEDIA_DEBUG] Media info returned: {media_info is not None}, Type: {media_info.get('type') if media_info else None}")
+                if media_info is False:  # Media blocked
+                    self.stats['messages_filtered'] += 1
+                    pair.stats['messages_filtered'] = pair.stats.get('messages_filtered', 0) + 1
+                    await self.db_manager.update_pair(pair)
+                    return True
             
-            for pair_id in self.source_to_pairs[chat_id]:
-                pair = self.pairs.get(pair_id)
-                if not pair or pair.status != "active":
-                    continue
-                
-                if not pair.filters.get("sync_deletes", False):
-                    continue
-                
-                message_data = {
-                    'type': 'delete_message',
-                    'event': event,
-                    'pair_id': pair_id,
-                    'timestamp': time.time()
-                }
-                
-                await self._queue_message(message_data, MessagePriority.NORMAL, pair_id, pair.assigned_bot_index)
-        
-        except Exception as e:
-            logger.error(f"Error handling message deletion: {e}")
-    
-    def _get_message_priority(self, event, pair: MessagePair) -> MessagePriority:
-        """Determine message priority"""
-        # High priority for replies if preserve_replies is enabled
-        if event.is_reply and pair.filters.get("preserve_replies", True):
-            return MessagePriority.HIGH
-        
-        # High priority for media messages
-        if event.media:
-            return MessagePriority.HIGH
-        
-        # Normal priority for regular messages
-        return MessagePriority.NORMAL
-    
-    async def _queue_message(self, message_data: dict, priority: MessagePriority, 
-                           pair_id: int, bot_index: int):
-        """Queue message for processing"""
-        try:
-            queued_msg = QueuedMessage(
-                data=message_data,
-                priority=priority,
-                timestamp=time.time(),
-                pair_id=pair_id,
-                bot_index=bot_index
+            # For URL messages without media, ensure webpage previews are enabled
+            # This is crucial for proper URL forwarding
+            contains_urls = bool(processed_content and self._contains_urls(processed_content))
+            if contains_urls:
+                logger.info(f"Message contains URLs, will enable webpage preview: {processed_content[:200]}...")
+            elif processed_content and self._contains_simple_urls(processed_content):
+                contains_urls = True
+                logger.info(f"Message contains simple URLs, will enable webpage preview: {processed_content[:200]}...")
+            
+            # Send message with full entity preservation and proper URL preview handling
+            sent_message = await self._send_message(
+                bot, pair.destination_chat_id, processed_content or "", 
+                media_info, reply_to_message_id, processed_entities or []
             )
             
-            # Check if queue is full
-            if self.message_queue.full():
-                logger.warning("Message queue is full, dropping oldest message")
-                try:
-                    self.message_queue.get_nowait()
-                except asyncio.QueueEmpty:
-                    pass
+            if sent_message:
+                # Save message mapping
+                mapping = MessageMapping(
+                    id=0,
+                    source_message_id=event.id,
+                    destination_message_id=sent_message.message_id,
+                    pair_id=pair.id,
+                    bot_index=bot_index,
+                    source_chat_id=pair.source_chat_id,
+                    destination_chat_id=pair.destination_chat_id,
+                    message_type=self._get_message_type(event),
+                    has_media=bool(event.media),
+                    is_reply=bool(reply_to_message_id),
+                    reply_to_source_id=event.reply_to_msg_id if event.is_reply else None,
+                    reply_to_dest_id=reply_to_message_id
+                )
+                
+                await self.db_manager.save_message_mapping(mapping)
+                
+                # Update statistics
+                self.stats['messages_copied'] += 1
+                pair.stats['messages_copied'] = pair.stats.get('messages_copied', 0) + 1
+                pair.stats['last_activity'] = datetime.now().isoformat()
+                
+                if event.media:
+                    self.stats['media_processed'] += 1
+                
+                if reply_to_message_id:
+                    pair.stats['replies_preserved'] = pair.stats.get('replies_preserved', 0) + 1
+                
+                await self.db_manager.update_pair(pair)
+                
+                logger.debug(f"Message copied: {event.id} -> {sent_message.message_id}")
+                return True
             
-            await self.message_queue.put(queued_msg)
+            return False
             
         except Exception as e:
-            logger.error(f"Failed to queue message: {e}")
+            logger.error(f"Error processing new message: {e}")
+            self.stats['errors'] += 1
+            pair.stats['errors'] = pair.stats.get('errors', 0) + 1
+            await self.db_manager.update_pair(pair)
+            return False
     
-    async def _message_worker(self, worker_id: int):
-        """Worker task for processing messages"""
-        logger.info(f"Message worker {worker_id} started")
-        
-        while self.running:
-            try:
-                # Get message from queue with timeout
-                try:
-                    queued_msg = await asyncio.wait_for(
-                        self.message_queue.get(),
-                        timeout=1.0
-                    )
-                except asyncio.TimeoutError:
-                    continue
-                
-                # Check if system is paused
-                paused = await self.db_manager.get_setting("system_paused", "false")
-                if paused and paused.lower() == "true":
-                    # Put message back in queue
-                    await self.message_queue.put(queued_msg)
-                    await asyncio.sleep(5)
-                    continue
-                
-                # Process message
-                success = await self._process_queued_message(queued_msg)
-                
-                # Update metrics
-                bot_metrics = self.bot_metrics.get(queued_msg.bot_index)
-                if bot_metrics:
-                    bot_metrics.update_success_rate(success)
-                    bot_metrics.messages_processed += 1
-                    bot_metrics.last_activity = time.time()
-                
-                # Handle retry if failed
-                if not success and queued_msg.retry_count < queued_msg.max_retries:
-                    queued_msg.retry_count += 1
-                    await asyncio.sleep(2 ** queued_msg.retry_count)  # Exponential backoff
-                    await self.message_queue.put(queued_msg)
-                
-            except Exception as e:
-                logger.error(f"Worker {worker_id} error: {e}")
-                await asyncio.sleep(1)
-        
-        logger.info(f"Message worker {worker_id} stopped")
-    
-    async def _process_queued_message(self, queued_msg: QueuedMessage) -> bool:
-        """Process a queued message"""
+    async def process_message_edit(self, event, pair: MessagePair, bot: Bot, bot_index: int) -> bool:
+        """Process message edit"""
         try:
-            start_time = time.time()
+            # Find original message mapping
+            mapping = await self.db_manager.get_message_mapping(event.id, pair.id)
+            if not mapping:
+                logger.debug(f"No mapping found for edited message {event.id}")
+                return True  # Not an error if we don't have the original
             
-            # Get pair first
-            pair = self.pairs.get(queued_msg.pair_id)
-            if not pair:
-                logger.warning(f"Pair {queued_msg.pair_id} not found")
+            # Process edited content with entities
+            processed_content, processed_entities = await self._process_message_content(event, pair)
+            if not processed_content:
                 return False
             
-            # Determine which bot to use
-            bot = None
-            bot_index = queued_msg.bot_index
-            
-            # Check if pair has a custom bot token assigned
-            if pair.bot_token_id:
-                logger.debug(f"Using custom bot token {pair.bot_token_id} for pair {pair.id}")
-                bot = await self._get_or_create_custom_bot(pair.bot_token_id)
-                if not bot:
-                    logger.error(f"Failed to get custom bot for token {pair.bot_token_id}, falling back to default bot")
-                    # Fall back to default bot
-                    if bot_index >= len(self.telegram_bots):
-                        bot_index = 0  # Fallback to primary bot
-                    bot = self.telegram_bots[bot_index]
-                else:
-                    # Use a special bot index for custom bots (negative to distinguish from default bots)
-                    bot_index = -pair.bot_token_id
-            else:
-                # Use default bot from config
-                if bot_index >= len(self.telegram_bots):
-                    bot_index = 0  # Fallback to primary bot
-                bot = self.telegram_bots[bot_index]
-            
-            # Check rate limits (only for default bots, custom bots have their own limits)
-            if bot_index >= 0 and not self._check_rate_limit(bot_index):
-                logger.warning(f"Rate limit exceeded for bot {bot_index}")
+            # Edit the destination message - ensure URLs are handled properly
+            try:
+                contains_urls = self._contains_urls(processed_content)
+                logger.info(f"Editing message with URLs: {contains_urls}, Content: {processed_content[:100]}...")
+                
+                await bot.edit_message_text(
+                    chat_id=pair.destination_chat_id,
+                    message_id=mapping.destination_message_id,
+                    text=processed_content,
+                    entities=processed_entities,
+                    disable_web_page_preview=not contains_urls,  # Enable preview only for URLs
+                    parse_mode=None  # Use entities to preserve formatting
+                )
+                
+                # Update statistics
+                pair.stats['edits_synced'] += 1
+                await self.db_manager.update_pair(pair)
+                
+                logger.debug(f"Message edited: {mapping.destination_message_id}")
+                return True
+                
+            except BadRequest as e:
+                if "message is not modified" in str(e).lower():
+                    return True  # Content unchanged, not an error
+                logger.warning(f"Failed to edit message: {e}")
                 return False
             
-            # Process based on message type
-            message_type = queued_msg.data['type']
-            event = queued_msg.data['event']
-            
-            success = False
-            if message_type == 'new_message':
-                success = await self.message_processor.process_new_message(
-                    event, pair, bot, bot_index
-                )
-            elif message_type == 'edit_message':
-                success = await self.message_processor.process_message_edit(
-                    event, pair, bot, bot_index
-                )
-            elif message_type == 'delete_message':
-                success = await self.message_processor.process_message_delete(
-                    event, pair, bot, bot_index
-                )
-            
-            # Update processing time (only for default bots)
-            processing_time = time.time() - start_time
-            if bot_index >= 0:  # Only update metrics for default bots
-                bot_metrics = self.bot_metrics.get(bot_index)
-                if bot_metrics:
-                    # Update average processing time with EMA
-                    alpha = 0.1
-                    bot_metrics.avg_processing_time = (
-                        alpha * processing_time + 
-                        (1 - alpha) * bot_metrics.avg_processing_time
-                    )
-            
-            return success
-            
-        except RetryAfter as e:
-            logger.warning(f"Rate limited by Telegram: {e.retry_after} seconds")
-            bot_metrics = self.bot_metrics.get(queued_msg.bot_index)
-            if bot_metrics:
-                bot_metrics.rate_limit_until = time.time() + float(getattr(e, 'retry_after', 60))
-            return False
-            
-        except (NetworkError, TimedOut) as e:
-            logger.warning(f"Network error: {e}")
-            return False
-            
-        except TelegramError as e:
-            logger.error(f"Telegram error: {e}")
-            await self._log_error("telegram_error", str(e), None, queued_msg.pair_id, queued_msg.bot_index)
-            return False
-            
         except Exception as e:
-            logger.error(f"Error processing message: {e}")
-            await self._log_error("processing_error", str(e), traceback.format_exc(), queued_msg.pair_id, queued_msg.bot_index)
+            logger.error(f"Error processing message edit: {e}")
             return False
     
-    def _check_rate_limit(self, bot_index: int) -> bool:
-        """Check if bot is rate limited"""
-        bot_metrics = self.bot_metrics.get(bot_index)
-        if bot_metrics and bot_metrics.rate_limit_until > time.time():
-            return False
-        
-        # Check message rate limit
-        now = time.time()
-        rate_limiter = self.rate_limiters[bot_index]
-        
-        # Remove old entries
-        while rate_limiter and rate_limiter[0] < now - self.config.RATE_LIMIT_WINDOW:
-            rate_limiter.popleft()
-        
-        # Check if limit exceeded
-        if len(rate_limiter) >= self.config.RATE_LIMIT_MESSAGES:
-            return False
-        
-        # Add current time
-        rate_limiter.append(now)
-        return True
-    
-    async def _health_monitor(self):
-        """Monitor bot health and performance"""
-        while self.running:
-            try:
-                await asyncio.sleep(self.config.HEALTH_CHECK_INTERVAL)
-                
-                # Check bot connectivity
-                for i, bot in enumerate(self.telegram_bots):
+    async def process_message_delete(self, event, pair: MessagePair, bot: Bot, bot_index: int) -> bool:
+        """Process message deletion"""
+        try:
+            deleted_count = 0
+            
+            # Handle multiple deleted messages
+            for message_id in event.deleted_ids:
+                mapping = await self.db_manager.get_message_mapping(message_id, pair.id)
+                if mapping:
                     try:
-                        await bot.get_me()
-                        bot_metrics = self.bot_metrics.get(i)
-                        if bot_metrics:
-                            bot_metrics.consecutive_failures = 0
-                    except Exception as e:
-                        logger.warning(f"Bot {i} health check failed: {e}")
-                        bot_metrics = self.bot_metrics.get(i)
-                        if bot_metrics:
-                            bot_metrics.consecutive_failures += 1
-                
-                # Log metrics
-                await self._log_metrics()
-                
-            except Exception as e:
-                logger.error(f"Health monitor error: {e}")
-    
-    async def _queue_monitor(self):
-        """Monitor message queue health"""
-        while self.running:
-            try:
-                await asyncio.sleep(30)
-                
-                queue_size = self.message_queue.qsize()
-                if queue_size > self.config.MESSAGE_QUEUE_SIZE * 0.8:
-                    logger.warning(f"Message queue is {queue_size}/{self.config.MESSAGE_QUEUE_SIZE}")
-                
-                # Update current load for each bot
-                for bot_index, metrics in self.bot_metrics.items():
-                    metrics.current_load = queue_size
-                
-            except Exception as e:
-                logger.error(f"Queue monitor error: {e}")
-    
-    async def _rate_limit_monitor(self):
-        """Monitor and reset rate limits"""
-        while self.running:
-            try:
-                await asyncio.sleep(60)
-                
-                now = time.time()
-                for bot_index, rate_limiter in self.rate_limiters.items():
-                    # Clean old entries
-                    while rate_limiter and rate_limiter[0] < now - self.config.RATE_LIMIT_WINDOW:
-                        rate_limiter.popleft()
-                
-            except Exception as e:
-                logger.error(f"Rate limit monitor error: {e}")
-
-    async def _subscription_expiry_checker(self):
-        """Background task to check and process expired subscriptions"""
-        while self.running:
-            try:
-                # Run every hour
-                await asyncio.sleep(3600)
-                
-                now = datetime.now().isoformat()
-                expired_subscriptions = await self.db_manager.get_expired_subscriptions(now)
-                
-                if not expired_subscriptions:
-                    continue
-                
-                logger.info(f"Found {len(expired_subscriptions)} expired subscriptions to process")
-                
-                for user_id, expires_at in expired_subscriptions:
-                    try:
-                        logger.info(f"Processing expired subscription for user {user_id} (expired at {expires_at})")
+                        await bot.delete_message(
+                            chat_id=pair.destination_chat_id,
+                            message_id=mapping.destination_message_id
+                        )
+                        deleted_count += 1
+                        logger.debug(f"Message deleted: {mapping.destination_message_id}")
                         
-                        # Kick user from all channels using the same logic as /kickall
-                        success_count, total_count = await self._kick_user_from_channels(user_id)
-                        
-                        logger.info(f"Auto-kicked expired user {user_id} from {success_count}/{total_count} channels")
-                        
-                        # Remove the subscription from database
-                        await self.db_manager.delete_subscription(user_id)
-                        logger.info(f"Removed expired subscription for user {user_id}")
-                        
-                        # Small delay between processing users to avoid rate limits
-                        await asyncio.sleep(1)
-                        
-                    except Exception as e:
-                        logger.error(f"Error processing expired subscription for user {user_id}: {e}")
-                
-                logger.info("Completed processing expired subscriptions")
-                
-            except Exception as e:
-                logger.error(f"Subscription expiry checker error: {e}")
-    
-    async def _get_or_create_custom_bot(self, bot_token_id: int) -> Optional[Bot]:
-        """Get or create a Bot instance for a specific bot_token_id"""
-        try:
-            # Check if we already have this bot cached
-            if bot_token_id in self.custom_bots:
-                return self.custom_bots[bot_token_id]
+                    except BadRequest as e:
+                        if "message to delete not found" not in str(e).lower():
+                            logger.warning(f"Failed to delete message: {e}")
+            
+            # Update statistics
+            if deleted_count > 0:
+                pair.stats['deletes_synced'] += deleted_count
+                await self.db_manager.update_pair(pair)
             
-            # Get token from database
-            token_data = await self.db_manager.get_bot_token_by_id(bot_token_id)
-            if not token_data:
-                logger.error(f"Bot token {bot_token_id} not found in database")
-                return None
-            
-            if not token_data['is_active']:
-                logger.error(f"Bot token {bot_token_id} is not active")
-                return None
-            
-            # Create custom HTTP request handler (same as default bots)
-            from telegram.request import HTTPXRequest
-            request = HTTPXRequest(
-                connection_pool_size=8,
-                read_timeout=30,
-                write_timeout=30,
-                connect_timeout=30,
-                pool_timeout=30
-            )
-            
-            # Create Bot instance
-            bot = Bot(token=token_data['token'], request=request)
-            
-            # Test bot connectivity
-            try:
-                bot_info = await bot.get_me()
-                logger.info(f"Custom bot created for token {bot_token_id}: @{bot_info.username}")
-                
-                # Cache the bot
-                self.custom_bots[bot_token_id] = bot
-                
-                # Update usage count in database
-                await self.db_manager.update_bot_token_usage(bot_token_id)
-                
-                return bot
-                
-            except Exception as e:
-                logger.error(f"Failed to connect to custom bot {bot_token_id}: {e}")
-                return None
-                
-        except Exception as e:
-            logger.error(f"Error creating custom bot for token {bot_token_id}: {e}")
-            return None
-    
-    async def _log_metrics(self):
-        """Log system metrics"""
-        try:
-            total_processed = sum(m.messages_processed for m in self.bot_metrics.values())
-            avg_success_rate = sum(m.success_rate for m in self.bot_metrics.values()) / len(self.bot_metrics) if self.bot_metrics else 0
-            queue_size = self.message_queue.qsize()
-            
-            logger.info(f"Metrics - Processed: {total_processed}, Success Rate: {avg_success_rate:.2f}, Queue: {queue_size}")
-            
-        except Exception as e:
-            logger.error(f"Failed to log metrics: {e}")
-    
-    async def _log_error(self, error_type: str, error_message: str, 
-                        stack_trace: Optional[str] = None, 
-                        pair_id: Optional[int] = None, 
-                        bot_index: Optional[int] = None):
-        """Log error to database"""
-        try:
-            await self.db_manager.log_error(error_type, error_message, pair_id, bot_index, stack_trace)
-        except Exception as e:
-            logger.error(f"Failed to log error to database: {e}")
-    
-    # Command handlers
-    async def _cmd_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Start command handler"""
-        if not update.effective_user or not self._is_admin(update.effective_user.id):
-            if update.message:
-                await update.message.reply_text("❌ You are not authorized to use this bot.")
-            return
-        if update.message:
-            await update.message.reply_text(
-            "🤖 Telegram Message Copying Bot\n\n"
-            "Available commands:\n"
-            "/status - System status\n"
-            "/stats - Statistics\n"
-            "/pairs - List message pairs\n"
-            "/pause - Pause system\n"
-            "/resume - Resume system\n"
-            "/help - Show help"
-        )
-    
-    async def _cmd_help(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Help command handler"""
-        if not update.effective_user or not self._is_admin(update.effective_user.id):
-            return
-        if not update.message:
-            return
-        
-        help_text = """🤖 Telegram Message Copying Bot
-
-System Management:
-/status - System status and overview
-/stats - Detailed statistics
-/health - Health monitoring
-/pause - Pause message processing
-/resume - Resume message processing
-/restart - Restart bot system
-
-Pair Management:
-/pairs - List all message pairs
-/addpair <source_chat_id> <dest_chat_id> <name> [bot_token_id] - Add new pair
-/delpair <id> - Delete pair
-/editpair <id> <setting> <value> - Edit pair settings
-/pairinfo <id> - Detailed pair information
-
-Examples:
-  /addpair -1002846119767 -1002761601205 "My Channel" 1
-  Use /listtokens to see available bot token IDs
-
-Bot Management:
-/bots - List all bot instances
-/botinfo <index> - Detailed bot information
-/rebalance - Rebalance message distribution
-
-Queue & Processing:
-/queue - View message queue status
-/clearqueue - Clear message queue
-
-Logs & Diagnostics:
-/logs [limit] - View recent log entries
-/errors [limit] - View recent errors
-/diagnostics - Run system diagnostics
-/checkaccess [pair_id] - Check bot access to configured chats
-
-Settings:
-/settings - View current settings
-/set <key> <value> - Update setting
-
-Content Filtering:
-/blockword <word> [pair_id] - Block word globally or for pair
-/unblockword <word> [pair_id] - Unblock word
-/listblocked [pair_id] - List blocked words
-/blockimage <pair_id> - Block image via reply
-/unblockimage <pair_id> <hash> - Unblock image
-/listblockedimages <pair_id> - List blocked images
-
-Text Processing:
-/mentions <pair_id> <enable|disable> [placeholder] - Configure mention removal
-/headerregex <pair_id> <pattern> - Set header removal regex
-/footerregex <pair_id> <pattern> - Set footer removal regex
-/watermark <pair_id> <enable|disable> [text] - Configure image watermarking
-/testfilter <pair_id> <text> - Test filtering on text
-
-Utilities:
-/backup - Create database backup
-/cleanup [--force] - Clean old data (preview or execute)
-
-Bot Token Management:
-/addtoken <name> <token> - Add new bot token
-/addbot <name> <token> - Add new bot token (alias)
-/listtokens - List all bot tokens
-/listbots - List all bot tokens (alias)
-/deletetoken <id> - Delete bot token
-/deletebot <id> - Delete bot token (alias)
-/toggletoken <id> - Toggle token active status
-/togglebot <id> - Toggle token active status (alias)
-
-User Management & Subscriptions:
-/kickall <user_id|@username> [duration_seconds] - Kick user from all channels
-/unbanall <user_id|@username> - Unban user from all channels
-/addsub <user_id|@username> <days> [notes] - Add user subscription
-/renewsub <user_id|@username> <days> - Renew existing subscription
-/listsubs - List all active subscriptions
-
-Features:
-✅ Multi-bot support with load balancing
-✅ Bot token management via commands
-✅ Advanced message filtering with whole-word blocking
-✅ Real-time synchronization with premium emoji support
-✅ Image duplicate detection and watermarking
-✅ Reply preservation and webpage preview handling
-✅ Edit/delete sync with formatting preservation
-✅ Mention removal and header/footer regex filtering
-✅ User subscription management with auto-expiry
-✅ Comprehensive statistics and auto-cleanup
-
-Recent Fixes:
-🔧 Word blocking now uses precise whole-word matching
-🔧 Fixed /addpair command with proper bot token validation
-🔧 Fixed custom bot token retrieval causing "Chat not found" errors
-🔧 Added /checkaccess command to diagnose chat access issues"""
-        
-        await update.message.reply_text(help_text, parse_mode=None)
-    
-    async def _cmd_status(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Status command handler"""
-        if not update.effective_user or not self._is_admin(update.effective_user.id):
-            return
-        
-        try:
-            # System status
-            paused = await self.db_manager.get_setting("system_paused", "false")
-            queue_size = self.message_queue.qsize()
-            active_pairs = len([p for p in self.pairs.values() if p.status == "active"])
-            
-            # Bot status
-            bot_status = []
-            for i, metrics in self.bot_metrics.items():
-                status = "🟢" if metrics.consecutive_failures == 0 else "🔴"
-                bot_status.append(f"{status} Bot {i}: {metrics.success_rate:.1%} success")
-            
-            status_text = f"""
-🔄 **System Status**
-
-**State:** {'⏸️ PAUSED' if paused == 'true' else '▶️ RUNNING'}
-**Queue:** {queue_size} messages
-**Active Pairs:** {active_pairs}
-
-**Bots:**
-{chr(10).join(bot_status)}
-
-**Uptime:** {self._get_uptime()}
-            """
-            
-            if update.message:
-                await update.message.reply_text(status_text, parse_mode='Markdown')
-            
-        except Exception as e:
-            if update.message:
-                await update.message.reply_text(f"Error getting status: {e}")
-    
-    async def _cmd_stats(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Statistics command handler"""
-        if not update.effective_user or not self._is_admin(update.effective_user.id) or not update.message:
-            return
-        
-        try:
-            stats = await self.db_manager.get_stats()
-            
-            # Calculate totals from bot metrics
-            total_processed = sum(m.messages_processed for m in self.bot_metrics.values())
-            avg_processing_time = sum(m.avg_processing_time for m in self.bot_metrics.values()) / len(self.bot_metrics) if self.bot_metrics else 0
-            
-            stats_text = f"""
-📊 **System Statistics**
-
-**Messages:**
-• Total processed: {total_processed:,}
-• Last 24h: {stats.get('messages_24h', 0):,}
-• In database: {stats.get('total_messages', 0):,}
-
-**Pairs:**
-• Total: {stats.get('total_pairs', 0)}
-• Active: {stats.get('active_pairs', 0)}
-
-**Performance:**
-• Avg processing time: {avg_processing_time:.2f}s
-• Queue size: {self.message_queue.qsize()}
-• Errors (24h): {stats.get('errors_24h', 0)}
-
-**Memory:** {self._get_memory_usage()}
-            """
-            
-            await update.message.reply_text(stats_text, parse_mode='Markdown')
-            
-        except Exception as e:
-            await update.message.reply_text(f"Error getting statistics: {e}")
-    
-    async def _cmd_pairs(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """List pairs command handler"""
-        if not update.effective_user or not self._is_admin(update.effective_user.id) or not update.message:
-            return
-        
-        try:
-            pairs = list(self.pairs.values())[:10]  # Show first 10
-            
-            if not pairs:
-                await update.message.reply_text("No message pairs configured.")
-                return
-            
-            pairs_text = "📋 **Message Pairs:**\n\n"
-            for pair in pairs:
-                status_emoji = "✅" if pair.status == "active" else "❌"
-                pairs_text += f"{status_emoji} **{pair.name}** (ID: {pair.id})\n"
-                pairs_text += f"   {pair.source_chat_id} → {pair.destination_chat_id}\n"
-                
-                # Show bot token information if available
-                bot_info = f"Bot: {pair.assigned_bot_index}"
-                if pair.bot_token_id:
-                    try:
-                        token = await self.db_manager.get_bot_token_string_by_id(pair.bot_token_id)
-                        if token:
-                            bot_info = f"Bot: {token['name']} (@{token['username']}, ID: {pair.bot_token_id})"
-                    except:
-                        bot_info = f"Bot: Token ID {pair.bot_token_id} (not found)"
-                
-                pairs_text += f"   {bot_info}, Messages: {pair.stats.get('messages_copied', 0)}\n\n"
-            
-            if len(self.pairs) > 10:
-                pairs_text += f"... and {len(self.pairs) - 10} more pairs"
-            
-            await update.message.reply_text(pairs_text, parse_mode='Markdown')
-            
-        except Exception as e:
-            if update.message:
-                await update.message.reply_text(f"Error listing pairs: {e}")
-    
-    async def _cmd_pause(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Pause system command handler"""
-        if not update.effective_user or not self._is_admin(update.effective_user.id):
-            return
-        if not update.message:
-            return
-        
-        try:
-            await self.db_manager.set_setting("system_paused", "true")
-            if update.message:
-                await update.message.reply_text("⏸️ System paused. Use /resume to continue.")
-            logger.info(f"System paused by user {update.effective_user.id}")
-            
-        except Exception as e:
-            if update.message:
-                await update.message.reply_text(f"Error pausing system: {e}")
-    
-    async def _cmd_resume(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Resume system command handler"""
-        if not update.effective_user or not self._is_admin(update.effective_user.id):
-            return
-        if not update.message:
-            return
-        
-        try:
-            await self.db_manager.set_setting("system_paused", "false")
-            if update.message:
-                await update.message.reply_text("▶️ System resumed.")
-            logger.info(f"System resumed by user {update.effective_user.id}")
-            
-        except Exception as e:
-            if update.message:
-                await update.message.reply_text(f"Error resuming system: {e}")
-    
-    async def _cmd_add_pair(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Add pair command handler with optional bot token selection"""
-        if not update.effective_user or not self._is_admin(update.effective_user.id) or not update.message:
-            return
-        
-        try:
-            if len(context.args) < 3:
-                await update.message.reply_text(
-                    "Usage: /addpair <source_chat_id> <dest_chat_id> <name> [bot_token_id]\n"
-                    "Use /listtokens to see available bot tokens"
-                )
-                return
-            
-            source_id = int(context.args[0])
-            dest_id = int(context.args[1])
-            bot_token_id = None
-            
-            # Check if bot_token_id is provided
-            if len(context.args) >= 4:
-                try:
-                    potential_token_id = int(context.args[3])
-                    # Verify token exists and is active
-                    token = await self.db_manager.get_bot_token_by_id(potential_token_id)
-                    if token and token['is_active']:
-                        bot_token_id = potential_token_id
-                        name = " ".join(context.args[2:3])  # Only take the name, not the token_id
-                    else:
-                        await update.message.reply_text(f"❌ Bot token {potential_token_id} not found or inactive. Use /listtokens to see available tokens.")
-                        return
-                except ValueError:
-                    # Last argument is not a number, treat as part of name
-                    name = " ".join(context.args[2:])
-            else:
-                name = " ".join(context.args[2:])
-            
-            pair_id = await self.db_manager.create_pair(source_id, dest_id, name, bot_token_id=bot_token_id)
-            await self._load_pairs()  # Reload pairs
-            
-            token_info = ""
-            if bot_token_id:
-                token = await self.db_manager.get_bot_token_by_id(bot_token_id)
-                if token:
-                    token_info = f"\n🤖 Using bot: {token['name']} (@{token['username']})"
-            
-            await update.message.reply_text(
-                f"✅ Created pair {pair_id}: {name}\n"
-                f"{source_id} → {dest_id}{token_info}"
-            )
-            
-        except ValueError as e:
-            if update.message:
-                await update.message.reply_text(f"Error: {e}")
-        except Exception as e:
-            if update.message:
-                await update.message.reply_text(f"Error adding pair: {e}")
-    
-    async def _cmd_delete_pair(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Delete pair command handler"""
-        if not update.effective_user or not self._is_admin(update.effective_user.id) or not update.message:
-            return
-        
-        try:
-            if not context.args:
-                await update.message.reply_text("Usage: /delpair <pair_id>")
-                return
-            
-            pair_id = int(context.args[0])
-            
-            if pair_id not in self.pairs:
-                await update.message.reply_text("Pair not found.")
-                return
-            
-            pair_name = self.pairs[pair_id].name
-            await self.db_manager.delete_pair(pair_id)
-            await self._load_pairs()  # Reload pairs
-            
-            await update.message.reply_text(f"✅ Deleted pair: {pair_name}")
-            
-        except ValueError:
-            if update.message:
-                await update.message.reply_text("Invalid pair ID.")
-        except Exception as e:
-            if update.message:
-                await update.message.reply_text(f"Error deleting pair: {e}")
-    
-    async def _handle_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Handle callback queries"""
-        # Placeholder for future callback implementations
-        query = update.callback_query
-        await query.answer()
-    
-    # Enhanced command handlers
-    async def _cmd_health(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Health monitoring command"""
-        if not update.effective_user or not self._is_admin(update.effective_user.id) or not update.message:
-            return
-        
-        try:
-            # Get system health info
-            memory_mb = self._get_memory_usage()
-            uptime = self._get_uptime()
-            queue_size = self.message_queue.qsize()
-            
-            # Bot health
-            healthy_bots = sum(1 for m in self.bot_metrics.values() if m.consecutive_failures == 0)
-            total_bots = len(self.bot_metrics)
-            
-            # Error rate
-            total_errors = sum(m.consecutive_failures for m in self.bot_metrics.values())
-            
-            health_text = f"""
-🏥 **System Health Report**
-
-**Overall Status:** {'🟢 Healthy' if healthy_bots == total_bots else '🟡 Warning' if healthy_bots > 0 else '🔴 Critical'}
-
-**System Resources:**
-• Memory Usage: {memory_mb}
-• Uptime: {uptime}
-• Queue Size: {queue_size}
-
-**Bot Health:**
-• Healthy Bots: {healthy_bots}/{total_bots}
-• Total Errors: {total_errors}
-
-**Performance:**
-• Messages in Queue: {queue_size}
-• Active Pairs: {len([p for p in self.pairs.values() if p.status == "active"])}
-            """
-            
-            await update.message.reply_text(health_text, parse_mode='Markdown')
-            
-        except Exception as e:
-            await update.message.reply_text(f"Error getting health info: {e}")
-    
-    async def _cmd_restart(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Restart system command"""
-        if not self._is_admin(update.effective_user.id):
-            return
-        
-        await update.message.reply_text("🔄 System restart functionality is not yet implemented. Use /pause and /resume instead.")
-    
-    async def _cmd_edit_pair(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Edit pair settings command"""
-        if not self._is_admin(update.effective_user.id):
-            return
-        
-        try:
-            if len(context.args) < 3:
-                await update.message.reply_text(
-                    "Usage: /editpair <pair_id> <setting> <value>\n"
-                    "Settings: name, status, sync_edits, sync_deletes, preserve_replies"
-                )
-                return
-            
-            pair_id = int(context.args[0])
-            setting = context.args[1]
-            value = " ".join(context.args[2:])
-            
-            if pair_id not in self.pairs:
-                await update.message.reply_text("Pair not found.")
-                return
-            
-            # Update pair setting (basic implementation)
-            pair = self.pairs[pair_id]
-            if setting == "name":
-                pair.name = value
-            elif setting == "status":
-                pair.status = value
-            else:
-                pair.filters[setting] = value.lower() == 'true' if value.lower() in ['true', 'false'] else value
-            
-            await update.message.reply_text(f"✅ Updated {setting} for pair {pair_id}")
-            
-        except ValueError:
-            await update.message.reply_text("Invalid pair ID.")
-        except Exception as e:
-            await update.message.reply_text(f"Error editing pair: {e}")
-    
-    async def _cmd_pair_info(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Detailed pair information command"""
-        if not self._is_admin(update.effective_user.id):
-            return
-        
-        try:
-            if not context.args:
-                await update.message.reply_text("Usage: /pairinfo <pair_id>")
-                return
-            
-            pair_id = int(context.args[0])
-            
-            if pair_id not in self.pairs:
-                await update.message.reply_text("Pair not found.")
-                return
-            
-            pair = self.pairs[pair_id]
-            
-            # Get bot token information if available
-            bot_info = f"Assigned Bot: {pair.assigned_bot_index}"
-            if pair.bot_token_id:
-                try:
-                    token = await self.db_manager.get_bot_token_by_id(pair.bot_token_id)
-                    if token:
-                        bot_info = f"Bot Token: {token['name']} (@{token['username']}, ID: {pair.bot_token_id})"
-                    else:
-                        bot_info = f"Bot Token: ID {pair.bot_token_id} (not found)"
-                except Exception:
-                    bot_info = f"Bot Token: ID {pair.bot_token_id} (error loading)"
-            
-            info_text = f"""
-📋 **Pair Information - {pair.name}**
-
-**Basic Info:**
-• ID: {pair.id}
-• Status: {pair.status}
-• Source: {pair.source_chat_id}
-• Destination: {pair.destination_chat_id}
-• {bot_info}
-
-**Statistics:**
-• Messages Copied: {pair.stats.get('messages_copied', 0)}
-• Errors: {pair.stats.get('errors', 0)}
-
-**Settings:**
-• Sync Edits: {pair.filters.get('sync_edits', True)}
-• Sync Deletes: {pair.filters.get('sync_deletes', False)}
-• Preserve Replies: {pair.filters.get('preserve_replies', True)}
-
-**Filters:**
-{chr(10).join([f"• {k}: {v}" for k, v in pair.filters.items() if k not in ['sync_edits', 'sync_deletes', 'preserve_replies']])}
-            """
-            
-            await update.message.reply_text(info_text, parse_mode='Markdown')
-            
-        except ValueError:
-            await update.message.reply_text("Invalid pair ID.")
-        except Exception as e:
-            await update.message.reply_text(f"Error getting pair info: {e}")
-    
-    async def _cmd_bots(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """List bot instances command"""
-        if not self._is_admin(update.effective_user.id):
-            return
-        
-        try:
-            bots_text = "🤖 **Bot Instances:**\n\n"
-            
-            for i, metrics in self.bot_metrics.items():
-                status_emoji = "🟢" if metrics.consecutive_failures == 0 else "🔴"
-                rate_limited = "⏰" if metrics.rate_limit_until > time.time() else ""
-                
-                bots_text += f"{status_emoji}{rate_limited} **Bot {i}**\n"
-                bots_text += f"  Success Rate: {metrics.success_rate:.1%}\n"
-                bots_text += f"  Messages: {metrics.messages_processed}\n"
-                bots_text += f"  Avg Time: {metrics.avg_processing_time:.2f}s\n"
-                bots_text += f"  Failures: {metrics.consecutive_failures}\n\n"
-            
-            await update.message.reply_text(bots_text, parse_mode='Markdown')
-            
-        except Exception as e:
-            await update.message.reply_text(f"Error listing bots: {e}")
-    
-    async def _cmd_bot_info(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Detailed bot information command"""
-        if not self._is_admin(update.effective_user.id):
-            return
-        
-        try:
-            if not context.args:
-                await update.message.reply_text("Usage: /botinfo <bot_index>")
-                return
-            
-            bot_index = int(context.args[0])
-            
-            if bot_index not in self.bot_metrics:
-                await update.message.reply_text("Bot not found.")
-                return
-            
-            metrics = self.bot_metrics[bot_index]
-            
-            info_text = f"""
-🤖 **Bot {bot_index} Information**
-
-**Status:** {'🟢 Healthy' if metrics.consecutive_failures == 0 else '🔴 Unhealthy'}
-**Rate Limited:** {'Yes' if metrics.rate_limit_until > time.time() else 'No'}
-
-**Performance:**
-• Messages Processed: {metrics.messages_processed}
-• Success Rate: {metrics.success_rate:.1%}
-• Avg Processing Time: {metrics.avg_processing_time:.2f}s
-• Current Load: {metrics.current_load}
-
-**Error Tracking:**
-• Consecutive Failures: {metrics.consecutive_failures}
-• Last Activity: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(metrics.last_activity))}
-            """
-            
-            await update.message.reply_text(info_text, parse_mode='Markdown')
-            
-        except ValueError:
-            await update.message.reply_text("Invalid bot index.")
-        except Exception as e:
-            await update.message.reply_text(f"Error getting bot info: {e}")
-    
-    async def _cmd_rebalance(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Rebalance message distribution command"""
-        if not self._is_admin(update.effective_user.id):
-            return
-        
-        try:
-            # Simple rebalancing: redistribute pairs across healthy bots
-            healthy_bots = [i for i, m in self.bot_metrics.items() if m.consecutive_failures == 0]
-            
-            if not healthy_bots:
-                await update.message.reply_text("❌ No healthy bots available for rebalancing.")
-                return
-            
-            rebalanced = 0
-            for pair_id, pair in self.pairs.items():
-                if pair.assigned_bot_index not in healthy_bots:
-                    # Reassign to a healthy bot
-                    pair.assigned_bot_index = healthy_bots[rebalanced % len(healthy_bots)]
-                    rebalanced += 1
-            
-            await update.message.reply_text(f"✅ Rebalanced {rebalanced} pairs across {len(healthy_bots)} healthy bots.")
-            
-        except Exception as e:
-            await update.message.reply_text(f"Error rebalancing: {e}")
-    
-    async def _cmd_queue(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """View message queue status command"""
-        if not self._is_admin(update.effective_user.id):
-            return
-        
-        try:
-            queue_size = self.message_queue.qsize()
-            max_size = self.config.MESSAGE_QUEUE_SIZE
-            
-            queue_text = f"""
-📊 **Message Queue Status**
-
-**Current Size:** {queue_size}/{max_size}
-**Usage:** {(queue_size/max_size*100):.1f}%
-**Status:** {'🟢 Normal' if queue_size < max_size * 0.7 else '🟡 High' if queue_size < max_size * 0.9 else '🔴 Critical'}
-
-**Queue Distribution:**
-            """
-            
-            # Add per-pair queue info if available
-            for pair_id, queue in self.pair_queues.items():
-                if len(queue) > 0:
-                    pair_name = self.pairs.get(pair_id, {}).name if pair_id in self.pairs else f"Pair {pair_id}"
-                    queue_text += f"• {pair_name}: {len(queue)} messages\n"
-            
-            await update.message.reply_text(queue_text, parse_mode='Markdown')
-            
-        except Exception as e:
-            await update.message.reply_text(f"Error getting queue status: {e}")
-    
-    async def _cmd_clear_queue(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Clear message queue command"""
-        if not self._is_admin(update.effective_user.id):
-            return
-        
-        try:
-            cleared = 0
-            while not self.message_queue.empty():
-                try:
-                    self.message_queue.get_nowait()
-                    cleared += 1
-                except asyncio.QueueEmpty:
-                    break
-            
-            await update.message.reply_text(f"✅ Cleared {cleared} messages from queue.")
-            
-        except Exception as e:
-            await update.message.reply_text(f"Error clearing queue: {e}")
-    
-    async def _cmd_logs(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """View recent log entries command"""
-        if not self._is_admin(update.effective_user.id):
-            return
-        
-        try:
-            limit = 10
-            if context.args:
-                try:
-                    limit = min(int(context.args[0]), 50)  # Max 50 logs
-                except ValueError:
-                    pass
-            
-            # Read recent logs from database or log file
-            logs_text = f"📜 **Recent Logs (Last {limit}):**\n\n"
-            logs_text += "Log viewing from database not yet implemented.\n"
-            logs_text += "Check the server logs for detailed information."
-            
-            await update.message.reply_text(logs_text, parse_mode='Markdown')
-            
-        except Exception as e:
-            await update.message.reply_text(f"Error getting logs: {e}")
-    
-    async def _cmd_errors(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """View recent errors command"""
-        if not self._is_admin(update.effective_user.id):
-            return
-        
-        try:
-            limit = 10
-            if context.args:
-                try:
-                    limit = min(int(context.args[0]), 20)  # Max 20 errors
-                except ValueError:
-                    pass
-            
-            errors_text = f"🚨 **Recent Errors (Last {limit}):**\n\n"
-            errors_text += "Error log viewing from database not yet implemented.\n"
-            errors_text += "Use /diagnostics for current system status."
-            
-            await update.message.reply_text(errors_text, parse_mode='Markdown')
-            
-        except Exception as e:
-            await update.message.reply_text(f"Error getting errors: {e}")
-    
-    async def _cmd_diagnostics(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Run system diagnostics command"""
-        if not self._is_admin(update.effective_user.id):
-            return
-        
-        try:
-            diagnostics = []
-            
-            # Check bot connectivity
-            healthy_bots = sum(1 for m in self.bot_metrics.values() if m.consecutive_failures == 0)
-            diagnostics.append(f"🤖 Bots: {healthy_bots}/{len(self.bot_metrics)} healthy")
-            
-            # Check queue status
-            queue_size = self.message_queue.qsize()
-            max_size = self.config.MESSAGE_QUEUE_SIZE
-            queue_status = "🟢" if queue_size < max_size * 0.7 else "🟡" if queue_size < max_size * 0.9 else "🔴"
-            diagnostics.append(f"{queue_status} Queue: {queue_size}/{max_size}")
-            
-            # Check database
-            diagnostics.append("💾 Database: Connected")
-            
-            # Check telethon client
-            client_status = "🟢 Connected" if self.telethon_client and self.telethon_client.is_connected() else "🔴 Disconnected"
-            diagnostics.append(f"📡 Telethon: {client_status}")
-            
-            # System paused status
-            paused = await self.db_manager.get_setting("system_paused", "false")
-            pause_status = "⏸️ Paused" if paused and paused.lower() == "true" else "▶️ Running"
-            diagnostics.append(f"⚙️ System: {pause_status}")
-            
-            diagnostics_text = f"🔍 **System Diagnostics**\n\n" + "\n".join(diagnostics)
-            
-            await update.message.reply_text(diagnostics_text, parse_mode='Markdown')
-            
-        except Exception as e:
-            await update.message.reply_text(f"Error running diagnostics: {e}")
-    
-    async def _cmd_settings(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """View current settings command"""
-        if not self._is_admin(update.effective_user.id):
-            return
-        
-        try:
-            settings_text = f"""
-⚙️ **Current Settings**
-
-**System:**
-• Max Workers: {self.config.MAX_WORKERS}
-• Queue Size: {self.config.MESSAGE_QUEUE_SIZE}
-• Rate Limit: {self.config.RATE_LIMIT_MESSAGES}/{self.config.RATE_LIMIT_WINDOW}s
-
-**Features:**
-• Debug Mode: {self.config.DEBUG_MODE}
-• Image Processing: {hasattr(self.config, 'ENABLE_IMAGE_PROCESSING') and self.config.ENABLE_IMAGE_PROCESSING}
-
-**Current Status:**
-• System Paused: {await self.db_manager.get_setting('system_paused', 'false')}
-• Active Pairs: {len([p for p in self.pairs.values() if p.status == 'active'])}
-• Total Bots: {len(self.telegram_bots)}
-            """
-            
-            await update.message.reply_text(settings_text, parse_mode='Markdown')
-            
-        except Exception as e:
-            await update.message.reply_text(f"Error getting settings: {e}")
-    
-    async def _cmd_set_setting(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Update setting command"""
-        if not self._is_admin(update.effective_user.id):
-            return
-        
-        try:
-            if not context.args or len(context.args) < 2:
-                await update.message.reply_text("Usage: /set <setting> <value>")
-                return
-            
-            setting = context.args[0]
-            value = " ".join(context.args[1:])
-            
-            # Only allow certain settings to be changed
-            allowed_settings = ['system_paused', 'debug_mode']
-            
-            if setting not in allowed_settings:
-                await update.message.reply_text(f"Setting '{setting}' cannot be changed. Allowed: {', '.join(allowed_settings)}")
-                return
-            
-            await self.db_manager.set_setting(setting, value)
-            await update.message.reply_text(f"✅ Updated {setting} = {value}")
-            
-        except Exception as e:
-            await update.message.reply_text(f"Error updating setting: {e}")
-    
-    async def _cmd_backup(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Create database backup command"""
-        if not self._is_admin(update.effective_user.id):
-            return
-        
-        try:
-            backup_name = f"backup_{int(time.time())}.db"
-            await update.message.reply_text(f"📦 Database backup functionality not yet implemented.\nWould create: {backup_name}")
-            
-        except Exception as e:
-            await update.message.reply_text(f"Error creating backup: {e}")
-    
-    async def _cmd_cleanup(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Clean old data command"""
-        if not self._is_admin(update.effective_user.id):
-            return
-        
-        try:
-            if context.args and context.args[0].lower() in ['--force', '-f']:
-                # Perform actual cleanup
-                await update.message.reply_text("🧹 Starting database cleanup...")
-                
-                # Clean old messages (older than 30 days)
-                cutoff_time = time.time() - (30 * 24 * 60 * 60)  # 30 days ago
-                cleaned_messages = await self.db_manager.cleanup_old_messages(cutoff_time)
-                
-                # Clean old errors (older than 7 days)
-                error_cutoff = time.time() - (7 * 24 * 60 * 60)  # 7 days ago
-                cleaned_errors = await self.db_manager.cleanup_old_errors(error_cutoff)
-                
-                # Clean orphaned image hashes
-                cleaned_hashes = await self.image_handler.cleanup_orphaned_hashes() if self.image_handler else 0
-                
-                cleanup_text = f"""
-✅ **Cleanup Complete**
-
-**Cleaned:**
-• Old messages: {cleaned_messages}
-• Old errors: {cleaned_errors}
-• Orphaned image hashes: {cleaned_hashes}
-
-**Result:** Database optimized and old data removed.
-                """
-                await update.message.reply_text(cleanup_text, parse_mode='Markdown')
-                
-            else:
-                # Show cleanup preview
-                cutoff_time = time.time() - (30 * 24 * 60 * 60)
-                error_cutoff = time.time() - (7 * 24 * 60 * 60)
-                
-                # Get counts without actually deleting
-                old_messages = await self.db_manager.count_old_messages(cutoff_time)
-                old_errors = await self.db_manager.count_old_errors(error_cutoff)
-                
-                preview_text = f"""
-🧹 **Cleanup Preview**
-
-**Will remove:**
-• Messages older than 30 days: {old_messages}
-• Errors older than 7 days: {old_errors}
-• Orphaned image hashes: (calculating...)
-
-Use `/cleanup --force` to proceed with cleanup.
-                """
-                await update.message.reply_text(preview_text, parse_mode='Markdown')
-            
-        except Exception as e:
-            await update.message.reply_text(f"Error during cleanup: {e}")
-    
-    # Advanced filtering command handlers
-    async def _cmd_block_word(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Block word globally or for specific pair"""
-        if not update.effective_user or not self._is_admin(update.effective_user.id):
-            return
-        
-        try:
-            if not context.args or len(context.args) < 1:
-                await update.message.reply_text(
-                    "Usage: /blockword <word> [pair_id]\n"
-                    "Without pair_id, blocks globally"
-                )
-                return
-            
-            word = context.args[0]
-            
-            if context.args and len(context.args) > 1:
-                # Block for specific pair
-                pair_id = int(context.args[1])
-                success = await self.message_filter.add_pair_word_block(pair_id, word)
-                if success:
-                    # Reload pairs to get the updated configuration
-                    await self._load_pairs()
-                    await update.message.reply_text(f"✅ Blocked word '{word}' for pair {pair_id}")
-                else:
-                    await update.message.reply_text(f"❌ Failed to block word for pair {pair_id}")
-            else:
-                # Block globally
-                await self.message_filter.add_global_word_block(word)
-                await update.message.reply_text(f"✅ Globally blocked word '{word}'")
-                
-        except ValueError:
-            await update.message.reply_text("Invalid pair ID.")
-        except Exception as e:
-            await update.message.reply_text(f"Error blocking word: {e}")
-    
-    async def _cmd_unblock_word(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Unblock word globally or for specific pair"""
-        if not update.effective_user or not self._is_admin(update.effective_user.id):
-            return
-        
-        try:
-            if not context.args or len(context.args) < 1:
-                await update.message.reply_text(
-                    "Usage: /unblockword <word> [pair_id]\n"
-                    "Without pair_id, unblocks globally"
-                )
-                return
-            
-            word = context.args[0]
-            
-            if context.args and len(context.args) > 1:
-                # Unblock for specific pair
-                pair_id = int(context.args[1])
-                
-                # Check if pair exists
-                if pair_id not in self.pairs:
-                    await update.message.reply_text(f"❌ Pair {pair_id} not found")
-                    return
-                
-                # Get current blocked words before removal
-                pair = self.pairs[pair_id]
-                current_blocked = pair.filters.get("blocked_words", [])
-                
-                if word not in current_blocked:
-                    await update.message.reply_text(f"ℹ️ Word '{word}' is not blocked for pair {pair_id}")
-                    return
-                
-                logger.info(f"Attempting to unblock word '{word}' for pair {pair_id}")
-                success = await self.message_filter.remove_pair_word_block(pair_id, word)
-                
-                if success:
-                    # Reload pairs to get the updated configuration
-                    await self._load_pairs()
-                    
-                    # Verify the word was actually removed
-                    updated_pair = self.pairs.get(pair_id)
-                    if updated_pair:
-                        updated_blocked = updated_pair.filters.get("blocked_words", [])
-                        if word not in updated_blocked:
-                            logger.info(f"Successfully unblocked word '{word}' for pair {pair_id}")
-                            await update.message.reply_text(
-                                f"✅ Unblocked word '{word}' for pair {pair_id}\n"
-                                f"📋 Current blocked words: {updated_blocked if updated_blocked else 'None'}"
-                            )
-                        else:
-                            logger.error(f"Word '{word}' still present after unblock operation for pair {pair_id}")
-                            await update.message.reply_text(f"❌ Failed to unblock word '{word}' - word still present after operation")
-                    else:
-                        await update.message.reply_text(f"❌ Failed to reload pair {pair_id} after unblock")
-                else:
-                    logger.error(f"Failed to unblock word '{word}' for pair {pair_id}")
-                    await update.message.reply_text(f"❌ Failed to unblock word '{word}' for pair {pair_id}")
-            else:
-                # Unblock globally
-                current_global = self.message_filter.global_blocks.get("words", [])
-                
-                if word not in current_global:
-                    await update.message.reply_text(f"ℹ️ Word '{word}' is not globally blocked")
-                    return
-                
-                logger.info(f"Attempting to unblock global word '{word}'")
-                await self.message_filter.remove_global_word_block(word)
-                
-                # Verify removal
-                updated_global = self.message_filter.global_blocks.get("words", [])
-                if word not in updated_global:
-                    logger.info(f"Successfully unblocked global word '{word}'")
-                    await update.message.reply_text(
-                        f"✅ Globally unblocked word '{word}'\n"
-                        f"📋 Current global blocks: {updated_global if updated_global else 'None'}"
-                    )
-                else:
-                    logger.error(f"Global word '{word}' still present after unblock operation")
-                    await update.message.reply_text(f"❌ Failed to unblock global word '{word}' - word still present after operation")
-                
-        except ValueError:
-            await update.message.reply_text("Invalid pair ID.")
-        except Exception as e:
-            logger.error(f"Error in unblock word command: {e}")
-            await update.message.reply_text(f"Error unblocking word: {e}")
-    
-    async def _cmd_list_blocked_words(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """List blocked words"""
-        if not self._is_admin(update.effective_user.id):
-            return
-        
-        try:
-            pair_id = None
-            if context.args:
-                pair_id = int(context.args[0])
-            
-            # Get global blocks
-            global_words = self.message_filter.global_blocks.get("words", [])
-            
-            blocked_text = "🚫 **Blocked Words:**\n\n"
-            
-            if global_words:
-                blocked_text += "**Global Blocks:**\n"
-                for word in global_words:
-                    blocked_text += f"• {word}\n"
-                blocked_text += "\n"
-            
-            if pair_id:
-                pair = self.pairs.get(pair_id)
-                if pair:
-                    pair_words = pair.filters.get("blocked_words", [])
-                    if pair_words:
-                        blocked_text += f"**Pair {pair_id} Blocks:**\n"
-                        for word in pair_words:
-                            blocked_text += f"• {word}\n"
-                    else:
-                        blocked_text += f"**Pair {pair_id}:** No blocked words\n"
-            else:
-                blocked_text += "Use `/listblocked <pair_id>` to see pair-specific blocks"
-            
-            await update.message.reply_text(blocked_text, parse_mode='Markdown')
-            
-        except ValueError:
-            await update.message.reply_text("Invalid pair ID.")
-        except Exception as e:
-            await update.message.reply_text(f"Error listing blocked words: {e}")
-    
-    async def _cmd_block_image(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Block image by replying to it"""
-        if not update.effective_user or not self._is_admin(update.effective_user.id):
-            return
-        
-        try:
-            if not update.message:
-                return
-            
-            reply_msg = update.message.reply_to_message
-            if not reply_msg or not reply_msg.photo:
-                await update.message.reply_text(
-                    "Reply to an image message to block it.\n"
-                    "Usage: /blockimage [pair_id] [description]\n"
-                    "Without pair_id, blocks globally"
-                )
-                return
-            
-            block_scope = "global"
-            pair_id = None
-            description = "Blocked via bot command"
-            
-            if context.args:
-                try:
-                    pair_id = int(context.args[0])
-                    block_scope = "pair"
-                    if len(context.args) > 1:
-                        description = " ".join(context.args[1:])
-                except ValueError:
-                    # First argument is description, not pair_id
-                    description = " ".join(context.args)
-            
-            # Alternative approach: Download image directly using Bot API and compute hash
-            try:
-                # Get file from Bot API
-                photo = reply_msg.photo[-1]  # Get largest photo
-                file = await context.bot.get_file(photo.file_id)
-                
-                # Download image data
-                from io import BytesIO
-                buffer = BytesIO()
-                await file.download_to_memory(buffer)
-                buffer.seek(0)
-                
-                # Compute hash directly
-                if self.image_handler.enabled:
-                    try:
-                        from PIL import Image
-                        import imagehash
-                        
-                        with Image.open(buffer) as img:
-                            if img.mode != 'RGB':
-                                img = img.convert('RGB')
-                            
-                            phash = imagehash.phash(img)
-                            image_hash = str(phash)
-                            
-                            # Use config default threshold
-                            similarity_threshold = self.config.SIMILARITY_THRESHOLD
-                            
-                            # Save to database directly
-                            async with self.db_manager.get_connection() as conn:
-                                await conn.execute('''
-                                    INSERT OR REPLACE INTO blocked_images 
-                                    (phash, pair_id, description, blocked_by, block_scope, similarity_threshold)
-                                    VALUES (?, ?, ?, ?, ?, ?)
-                                ''', (
-                                    image_hash,
-                                    pair_id if block_scope == "pair" else None,
-                                    description,
-                                    str(update.effective_user.id),
-                                    block_scope,
-                                    similarity_threshold
-                                ))
-                                await conn.commit()
-                            
-                            success = True
-                            logger.info(f"Added image block: {image_hash} (scope: {block_scope})")
-                    except Exception as hash_error:
-                        logger.error(f"Error computing image hash: {hash_error}")
-                        success = False
-                else:
-                    await update.message.reply_text("Image processing not available (PIL/imagehash not installed)")
-                    return
-                    
-            except Exception as download_error:
-                logger.error(f"Error downloading image: {download_error}")
-                success = False
-            
-            if success:
-                scope_text = f"for pair {pair_id}" if block_scope == "pair" else "globally"
-                await update.message.reply_text(f"✅ Image blocked {scope_text}")
-            else:
-                await update.message.reply_text("❌ Failed to block image")
-                
-        except Exception as e:
-            await update.message.reply_text(f"Error blocking image: {e}")
-    
-    async def _cmd_unblock_image(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Unblock image by hash"""
-        if not self._is_admin(update.effective_user.id):
-            return
-        
-        try:
-            if not context.args:
-                await update.message.reply_text(
-                    "Usage: /unblockimage <image_hash> [pair_id]\n"
-                    "Without pair_id, removes global block"
-                )
-                return
-            
-            image_hash = context.args[0]
-            pair_id = int(context.args[1]) if len(context.args) > 1 else None
-            
-            success = await self.image_handler.remove_image_block(image_hash, pair_id)
-            
-            if success:
-                scope_text = f"for pair {pair_id}" if pair_id else "globally"
-                await update.message.reply_text(f"✅ Image unblocked {scope_text}")
-            else:
-                await update.message.reply_text("❌ Failed to unblock image")
-                
-        except ValueError:
-            await update.message.reply_text("Invalid pair ID.")
-        except Exception as e:
-            await update.message.reply_text(f"Error unblocking image: {e}")
-    
-    async def _cmd_list_blocked_images(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """List blocked images"""
-        if not self._is_admin(update.effective_user.id):
-            return
-        
-        try:
-            pair_id = int(context.args[0]) if context.args else None
-            
-            blocked_images = await self.image_handler.get_blocked_images(pair_id)
-            
-            if not blocked_images:
-                await update.message.reply_text("No blocked images found.")
-                return
-            
-            images_text = f"🖼️ **Blocked Images ({len(blocked_images)}):**\n\n"
-            
-            for img in blocked_images[:10]:  # Limit to 10 for readability
-                scope = img['block_scope']
-                images_text += f"**Hash:** `{img['phash'][:16]}...`\n"
-                images_text += f"**Scope:** {scope}"
-                if img['pair_id']:
-                    images_text += f" (Pair {img['pair_id']})"
-                images_text += f"\n**Used:** {img['usage_count']} times\n"
-                if img['description']:
-                    images_text += f"**Description:** {img['description']}\n"
-                images_text += "\n"
-            
-            if len(blocked_images) > 10:
-                images_text += f"... and {len(blocked_images) - 10} more images"
-            
-            await update.message.reply_text(images_text, parse_mode='Markdown')
-            
-        except ValueError:
-            await update.message.reply_text("Invalid pair ID.")
-        except Exception as e:
-            await update.message.reply_text(f"Error listing blocked images: {e}")
-    
-    async def _cmd_set_mention_removal(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Configure mention removal for pair"""
-        if not self._is_admin(update.effective_user.id):
-            return
-        
-        try:
-            if len(context.args) < 2:
-                await update.message.reply_text(
-                    "Usage: /mentions <pair_id> <enable|disable> [placeholder]\n"
-                    "Example: /mentions 1 enable [User]\n"
-                    "Example: /mentions 1 disable"
-                )
-                return
-            
-            pair_id = int(context.args[0])
-            action = context.args[1].lower()
-            placeholder = " ".join(context.args[2:]) if len(context.args) > 2 else ""
-            
-            if action not in ['enable', 'disable']:
-                await update.message.reply_text("Action must be 'enable' or 'disable'")
-                return
-            
-            remove_mentions = action == 'enable'
-            success = await self.message_filter.set_mention_removal(pair_id, remove_mentions, placeholder)
-            
-            if success:
-                # Reload pairs to get the updated configuration
-                await self._load_pairs()
-                
-                if remove_mentions:
-                    placeholder_text = f" with placeholder '{placeholder}'" if placeholder else " (complete removal)"
-                    await update.message.reply_text(f"✅ Mention removal enabled for pair {pair_id}{placeholder_text}")
-                else:
-                    await update.message.reply_text(f"✅ Mention removal disabled for pair {pair_id}")
-            else:
-                await update.message.reply_text(f"❌ Failed to update mention removal for pair {pair_id}")
-                
-        except ValueError:
-            await update.message.reply_text("Invalid pair ID.")
-        except Exception as e:
-            await update.message.reply_text(f"Error configuring mention removal: {e}")
-    
-    async def _cmd_watermark(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Configure watermark for pair"""
-        if not self._is_admin(update.effective_user.id):
-            return
-        
-        try:
-            if len(context.args) < 2:
-                await update.message.reply_text(
-                    "Usage: /watermark <pair_id> <enable|disable> [text]\n"
-                    "Example: /watermark 1 enable @Traders_Hive\n"
-                    "Example: /watermark 1 disable"
-                )
-                return
-            
-            pair_id = int(context.args[0])
-            action = context.args[1].lower()
-            watermark_text = " ".join(context.args[2:]) if len(context.args) > 2 else ""
-            
-            if action not in ['enable', 'disable']:
-                await update.message.reply_text("Action must be 'enable' or 'disable'")
-                return
-            
-            # Check if pair exists
-            pair = await self.db_manager.get_pair(pair_id)
-            if not pair:
-                await update.message.reply_text(f"Pair {pair_id} not found")
-                return
-            
-            # Update watermark settings
-            watermark_enabled = action == 'enable'
-            
-            await self.db_manager.update_pair_filter(pair_id, 'watermark_enabled', watermark_enabled)
-            if watermark_enabled and watermark_text:
-                await self.db_manager.update_pair_filter(pair_id, 'watermark_text', watermark_text)
-            
-            # Reload pairs to get updated configuration
-            await self._load_pairs()
-            
-            if watermark_enabled:
-                text_info = f" with text '{watermark_text}'" if watermark_text else " (no text specified)"
-                await update.message.reply_text(f"✅ Watermark enabled for pair {pair_id}{text_info}")
-            else:
-                await update.message.reply_text(f"✅ Watermark disabled for pair {pair_id}")
-                
-        except ValueError:
-            await update.message.reply_text("Invalid pair ID.")
-        except Exception as e:
-            await update.message.reply_text(f"Error configuring watermark: {e}")
-    
-    async def _cmd_set_header_regex(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Set header removal regex for pair"""
-        if not self._is_admin(update.effective_user.id):
-            return
-        
-        try:
-            if len(context.args) < 2:
-                await update.message.reply_text(
-                    "Usage: /headerregex <pair_id> <regex_pattern>\n"
-                    "Use /headerregex <pair_id> clear to remove\n"
-                    "Example: /headerregex 1 ^.*?[:|：].*"
-                )
-                return
-            
-            pair_id = int(context.args[0])
-            pattern = " ".join(context.args[1:])
-            
-            if pattern.lower() == 'clear':
-                pattern = ""
-            
-            success = await self.message_filter.set_pair_header_footer_regex(pair_id, header_regex=pattern)
-            
-            if success:
-                # Reload pairs to get the updated configuration
-                await self._load_pairs()
-                
-                if pattern:
-                    await update.message.reply_text(f"✅ Header regex set for pair {pair_id}: `{pattern}`")
-                else:
-                    await update.message.reply_text(f"✅ Header regex cleared for pair {pair_id}")
-            else:
-                await update.message.reply_text(f"❌ Failed to set header regex for pair {pair_id}")
-                
-        except ValueError:
-            await update.message.reply_text("Invalid pair ID.")
-        except Exception as e:
-            await update.message.reply_text(f"Error setting header regex: {e}")
-    
-    async def _cmd_set_footer_regex(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Set footer removal regex for pair"""
-        if not self._is_admin(update.effective_user.id):
-            return
-        
-        try:
-            if len(context.args) < 2:
-                await update.message.reply_text(
-                    "Usage: /footerregex <pair_id> <regex_pattern>\n"
-                    "Use /footerregex <pair_id> clear to remove\n"
-                    "Example: /footerregex 1 @\\w+.*$"
-                )
-                return
-            
-            pair_id = int(context.args[0])
-            pattern = " ".join(context.args[1:])
-            
-            if pattern.lower() == 'clear':
-                pattern = ""
-            
-            success = await self.message_filter.set_pair_header_footer_regex(pair_id, footer_regex=pattern)
-            
-            if success:
-                # Reload pairs to get the updated configuration
-                await self._load_pairs()
-                
-                if pattern:
-                    await update.message.reply_text(f"✅ Footer regex set for pair {pair_id}: `{pattern}`")
-                else:
-                    await update.message.reply_text(f"✅ Footer regex cleared for pair {pair_id}")
-            else:
-                await update.message.reply_text(f"❌ Failed to set footer regex for pair {pair_id}")
-                
-        except ValueError:
-            await update.message.reply_text("Invalid pair ID.")
-        except Exception as e:
-            await update.message.reply_text(f"Error setting footer regex: {e}")
-    
-    async def _cmd_watermark(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Configure watermark for pair"""
-        if not self._is_admin(update.effective_user.id):
-            return
-        
-        try:
-            if len(context.args) < 2:
-                await update.message.reply_text(
-                    "Usage: /watermark <pair_id> <enable|disable> [text]\n"
-                    "Examples:\n"
-                    "/watermark 5 enable @Traders_Hive\n"
-                    "/watermark 5 disable"
-                )
-                return
-            
-            pair_id = int(context.args[0])
-            action = context.args[1].lower()
-            text = " ".join(context.args[2:]) if len(context.args) > 2 else None
-            
-            if action not in ['enable', 'disable']:
-                await update.message.reply_text("Action must be 'enable' or 'disable'")
-                return
-            
-            # Check if pair exists
-            if pair_id not in self.pairs:
-                await update.message.reply_text(f"Pair {pair_id} not found")
-                return
-            
-            enable_watermark = action == 'enable'
-            
-            # Update watermark settings
-            await self.db_manager.update_pair_filter(pair_id, "watermark_enabled", enable_watermark)
-            
-            if text and enable_watermark:
-                await self.db_manager.update_pair_filter(pair_id, "watermark_text", text)
-            
-            # Reload pairs to get updated configuration
-            await self._load_pairs()
-            
-            # Build response message
-            status = "enabled" if enable_watermark else "disabled"
-            response = f"✅ Watermark {status} for pair {pair_id}"
-            
-            if enable_watermark and text:
-                response += f" with text: {text}"
-            elif enable_watermark and not text:
-                # Get current text from pair if any
-                pair = self.pairs.get(pair_id)
-                if pair and pair.filters.get("watermark_text"):
-                    current_text = pair.filters["watermark_text"]
-                    response += f" (using existing text: {current_text})"
-                else:
-                    response += " (no watermark text set - images will have blank overlay)"
-            
-            await update.message.reply_text(response)
-            
-        except ValueError:
-            await update.message.reply_text("Invalid pair ID.")
-        except Exception as e:
-            await update.message.reply_text(f"Error configuring watermark: {e}")
-    
-    async def _cmd_test_filter(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Test filtering on a message"""
-        if not self._is_admin(update.effective_user.id):
-            return
-        
-        try:
-            if not context.args:
-                await update.message.reply_text(
-                    "Usage: /testfilter <pair_id> <text_to_test>\n"
-                    "Example: /testfilter 1 Hello @username this is a test"
-                )
-                return
-            
-            pair_id = int(context.args[0])
-            test_text = " ".join(context.args[1:])
-            
-            if pair_id not in self.pairs:
-                await update.message.reply_text("Pair not found.")
-                return
-            
-            pair = self.pairs[pair_id]
-            
-            # Apply text filtering
-            filtered_text = await self.message_filter.filter_text(test_text, pair)
-            
-            result_text = f"🧪 **Filter Test Results for Pair {pair_id}:**\n\n"
-            result_text += f"**Original:** {test_text}\n\n"
-            result_text += f"**Filtered:** {filtered_text}\n\n"
-            
-            # Show what filters would be applied
-            result_text += "**Active Filters:**\n"
-            filters = []
-            if pair.filters.get("remove_mentions"):
-                placeholder = pair.filters.get("mention_placeholder", "(removed)")
-                filters.append(f"• Mention removal: {placeholder}")
-            if pair.filters.get("header_regex"):
-                filters.append(f"• Header regex: `{pair.filters['header_regex']}`")
-            if pair.filters.get("footer_regex"):
-                filters.append(f"• Footer regex: `{pair.filters['footer_regex']}`")
-            
-            if filters:
-                result_text += "\n".join(filters)
-            else:
-                result_text += "No text filters configured"
-            
-            await update.message.reply_text(result_text, parse_mode='Markdown')
-            
-        except ValueError:
-            await update.message.reply_text("Invalid pair ID.")
-        except Exception as e:
-            await update.message.reply_text(f"Error testing filter: {e}")
-    
-    def _is_admin(self, user_id: Optional[int]) -> bool:
-        """Check if user is admin"""
-        if user_id is None:
-            return False
-        
-        # If no admin users configured, allow all users for initial setup
-        if not self.config.ADMIN_USER_IDS:
-            logger.warning(f"No admin users configured, allowing user {user_id} for setup")
             return True
             
-        return user_id in self.config.ADMIN_USER_IDS
-    
-    async def _safe_reply(self, update: Update, text: str, parse_mode: str = None) -> bool:
-        """Safely reply to a message, returning True if successful"""
-        try:
-            if update and update.message:
-                await update.message.reply_text(text, parse_mode=parse_mode)
-                return True
         except Exception as e:
-            logger.error(f"Failed to send reply: {e}")
+            logger.error(f"Error processing message deletion: {e}")
+            return False
+    
+    async def _process_message_content(self, event, pair: MessagePair) -> tuple[Optional[str], List]:
+        """Process and filter message content with full entity support and formatting preservation"""
+        try:
+            # Use raw_text to preserve original formatting without markdown conversion
+            text = event.raw_text or event.text or ""
+            entities = getattr(event, 'entities', []) or []
+            
+            logger.debug(f"Processing message content: {text[:100]}... (entities: {len(entities)})")
+            
+            # Always apply text filters (mention removal, header/footer, etc.) but preserve formatting
+            # First apply all text transformations
+            filtered_text, processed_entities = await self.message_filter.filter_text(text, pair, entities)
+            
+            # Log text filtering results
+            original_lines = len(text.split('\n'))
+            filtered_lines = len(filtered_text.split('\n'))
+            logger.info(f"Text filtering completed - Lines: {original_lines} → {filtered_lines}, Length: {len(text)} → {len(filtered_text)}")
+            
+            if text != filtered_text:
+                logger.info(f"Text was modified by filters")
+                logger.debug(f"Original: {repr(text[:200])}")
+                logger.debug(f"Filtered: {repr(filtered_text[:200])}")
+            else:
+                logger.info(f"Text unchanged by filters")
+            
+            # Check length limits
+            min_length = pair.filters.get("min_message_length", 0)
+            max_length = pair.filters.get("max_message_length", 0)
+            
+            if min_length > 0 and len(filtered_text) < min_length:
+                return None, []
+            
+            if max_length > 0 and len(filtered_text) > max_length:
+                # Truncate text and adjust entities
+                filtered_text = filtered_text[:max_length] + "..."
+                processed_entities = [
+                    e for e in processed_entities 
+                    if getattr(e, 'offset', 0) + getattr(e, 'length', 0) <= max_length
+                ]
+            
+            return filtered_text, processed_entities
+            
+        except Exception as e:
+            logger.error(f"Error processing message content: {e}")
+            # Return original text as fallback
+            return event.raw_text or event.text or "", []
+    
+    async def _process_media(self, event, pair: MessagePair, bot: Bot) -> Optional[Any]:
+        """Process media content with comprehensive type detection and web page support"""
+        try:
+            media = event.media
+            
+            # Handle web page previews
+            if hasattr(media, '__class__') and 'MessageMediaWebPage' in str(media.__class__):
+                # Extract webpage info
+                webpage = getattr(media, 'webpage', None)
+                if webpage:
+                    return {
+                        'type': 'webpage',
+                        'url': getattr(webpage, 'url', ''),
+                        'title': getattr(webpage, 'title', ''),
+                        'description': getattr(webpage, 'description', ''),
+                        'photo': getattr(webpage, 'photo', None),
+                        'original_media': media
+                    }
+            
+            # Check if media type is allowed
+            allowed_types = pair.filters.get("allowed_media_types", [
+                "photo", "video", "document", "audio", "voice", "animation", "video_note", "sticker", "webpage"
+            ])
+            
+            media_type = self._get_media_type(media)
+            if media_type not in allowed_types:
+                logger.debug(f"Media type {media_type} not allowed")
+                return False  # Media blocked
+            
+            # Special handling for images with enhanced duplicate detection
+            if media_type in ["photo", "animation"] or (isinstance(media, MessageMediaDocument) and media_type == "photo"):
+                if await self.image_handler.is_image_blocked(event, pair):
+                    logger.debug("Image blocked as duplicate")
+                    pair.stats['images_blocked'] = pair.stats.get('images_blocked', 0) + 1
+                    return False
+            
+            # Download media with comprehensive error handling and retries
+            media_data = None
+            max_retries = 3
+            for attempt in range(max_retries):
+                try:
+                    media_data = await self._download_media(event)
+                    if media_data:
+                        break
+                except Exception as download_error:
+                    logger.warning(f"Media download attempt {attempt + 1} failed: {download_error}")
+                    if attempt == max_retries - 1:
+                        logger.error(f"All download attempts failed for media type {media_type}")
+                        return None
+            
+            if not media_data:
+                logger.warning("Failed to download media after all attempts")
+                return None
+            
+            # Extract comprehensive media attributes with safe attribute access
+            filename = None
+            duration = None
+            width = None
+            height = None
+            thumb = None
+            
+            if hasattr(media, 'document') and media.document and getattr(media.document, 'attributes', None):
+                document = media.document
+                attributes = getattr(document, 'attributes', [])
+                
+                # Safely extract filename and attributes from document
+                for attr in attributes:
+                    attr_type = type(attr).__name__
+                    # Extract filename from DocumentAttributeFilename
+                    if attr_type == 'DocumentAttributeFilename':
+                        filename = getattr(attr, 'file_name', None)
+                    # Extract duration from DocumentAttributeVideo or DocumentAttributeAudio
+                    elif attr_type in ['DocumentAttributeVideo', 'DocumentAttributeAudio']:
+                        duration = getattr(attr, 'duration', None)
+                    # Extract dimensions from DocumentAttributeVideo or DocumentAttributeImageSize
+                    elif attr_type in ['DocumentAttributeVideo', 'DocumentAttributeImageSize']:
+                        width = getattr(attr, 'w', None)
+                        height = getattr(attr, 'h', None)
+                
+                # Extract thumbnail safely
+                if hasattr(document, 'thumbs') and getattr(document, 'thumbs', None):
+                    thumbs = getattr(document, 'thumbs', [])
+                    thumb = thumbs[0] if thumbs else None
+            
+            elif hasattr(event.media, 'photo') and getattr(event.media, 'photo', None):
+                # Handle photo attributes
+                photo = event.media.photo
+                if hasattr(photo, 'sizes') and photo.sizes:
+                    largest_size = max(photo.sizes, key=lambda s: getattr(s, 'w', 0) * getattr(s, 'h', 0))
+                    width = getattr(largest_size, 'w', None)
+                    height = getattr(largest_size, 'h', None)
+            
+            # Get MIME type safely
+            mime_type = None
+            if hasattr(media, 'document') and media.document:
+                mime_type = getattr(media.document, 'mime_type', None)
+            
+            return {
+                'type': media_type,
+                'data': media_data,
+                'filename': filename,
+                'duration': duration,
+                'width': width,
+                'height': height,
+                'thumbnail': thumb,
+                'caption': event.raw_text or event.text or "",  # Use raw_text to preserve formatting
+                'original_media': media,
+                'mime_type': mime_type
+            }
+            
+        except Exception as e:
+            logger.error(f"Error processing media: {e}")
+            return None
+    
+    async def _download_and_prepare_media(self, event, pair: MessagePair, bot: Bot) -> Optional[Dict]:
+        """Download media via Telethon and prepare for Bot API sending"""
+        import time
+        start_time = time.time()
+        
+        try:
+            # Get media type and MIME type for logging
+            media_type = self._get_message_type(event)
+            mime_type = None
+            if hasattr(event.media, 'document') and event.media.document:
+                mime_type = getattr(event.media.document, 'mime_type', 'unknown')
+            
+            logger.info(f"[MEDIA_DEBUG] Starting media processing - Type: {media_type}, MIME: {mime_type}, Pair: {pair.id}")
+            
+            if media_type == "text":
+                return None
+            
+            # Create a temporary file for download
+            temp_file = None
+            download_start = time.time()
+            try:
+                # Download media to temporary file
+                temp_file = await event.download_media(file=tempfile.mktemp())
+                download_time = time.time() - download_start
+                
+                if not temp_file or not os.path.exists(temp_file):
+                    logger.error(f"[MEDIA_DEBUG] Download failed - no file created, Pair: {pair.id}")
+                    return None
+                
+                file_size = os.path.getsize(temp_file) if os.path.exists(temp_file) else 0
+                logger.info(f"[MEDIA_DEBUG] Download completed - File: {temp_file}, Size: {file_size} bytes, Time: {download_time:.2f}s, Pair: {pair.id}")
+                
+                # Check if watermarking is enabled for this pair and if this is an image
+                watermark_enabled = pair.filters.get("watermark_enabled", False)
+                watermark_text = pair.filters.get("watermark_text", "")
+                
+                logger.info(f"[MEDIA_DEBUG] Watermark check - Enabled: {watermark_enabled}, Text: '{watermark_text}', Type: {media_type}, Pair: {pair.id}")
+                
+                # Apply watermark if enabled and media is an image
+                if watermark_enabled and watermark_text and media_type in ['photo', 'document']:
+                    # Check if it's actually an image for documents
+                    is_image = media_type == 'photo'
+                    if media_type == 'document' and hasattr(event.media, 'document') and event.media.document:
+                        mime_type = getattr(event.media.document, 'mime_type', '').lower()
+                        is_image = mime_type.startswith('image/')
+                        logger.info(f"[MEDIA_DEBUG] Document MIME check - MIME: {mime_type}, Is Image: {is_image}, Pair: {pair.id}")
+                    
+                    if is_image:
+                        # Apply watermark
+                        watermark_start = time.time()
+                        watermarked_file = temp_file.replace(os.path.splitext(temp_file)[1], "_watermarked.jpg")
+                        
+                        logger.info(f"[MEDIA_DEBUG] Starting watermark - Input: {temp_file}, Output: {watermarked_file}, Text: '{watermark_text}', Pair: {pair.id}")
+                        
+                        success = self.image_handler.add_text_watermark(temp_file, watermarked_file, watermark_text)
+                        watermark_time = time.time() - watermark_start
+                        
+                        if success:
+                            # Verify watermarked file exists and has content
+                            if os.path.exists(watermarked_file):
+                                watermarked_size = os.path.getsize(watermarked_file)
+                                logger.info(f"[MEDIA_DEBUG] Watermark success - Size: {watermarked_size} bytes, Time: {watermark_time:.2f}s, Pair: {pair.id}")
+                                
+                                if watermarked_size > 0:
+                                    # Clean up original file and use watermarked version
+                                    try:
+                                        os.unlink(temp_file)
+                                    except Exception as cleanup_error:
+                                        logger.warning(f"[MEDIA_DEBUG] Failed to cleanup original file: {cleanup_error}")
+                                    temp_file = watermarked_file
+                                else:
+                                    logger.error(f"[MEDIA_DEBUG] Watermarked file is empty - Size: 0 bytes, Pair: {pair.id}")
+                                    try:
+                                        os.unlink(watermarked_file)
+                                    except:
+                                        pass
+                            else:
+                                logger.error(f"[MEDIA_DEBUG] Watermarked file not created - Path: {watermarked_file}, Pair: {pair.id}")
+                        else:
+                            logger.error(f"[MEDIA_DEBUG] Watermark failed - Time: {watermark_time:.2f}s, Pair: {pair.id}")
+                    else:
+                        logger.info(f"[MEDIA_DEBUG] Skipping watermark - not an image, Type: {media_type}, MIME: {mime_type}, Pair: {pair.id}")
+                else:
+                    logger.info(f"[MEDIA_DEBUG] Skipping watermark - conditions not met, Pair: {pair.id}")
+                
+                # Extract media attributes safely
+                logger.info(f"[MEDIA_DEBUG] Extracting attributes - Type: {media_type}, File: {temp_file}, Pair: {getattr(pair, 'id', 'unknown')}")
+                filename = None
+                duration = None
+                width = None
+                height = None
+                
+                if hasattr(event.media, 'document') and event.media.document:
+                    document = event.media.document
+                    if getattr(document, 'attributes', None):
+                        for attr in document.attributes:
+                            attr_type = type(attr).__name__
+                            if attr_type == 'DocumentAttributeFilename':
+                                filename = getattr(attr, 'file_name', None)
+                            elif attr_type in ['DocumentAttributeVideo', 'DocumentAttributeAudio']:
+                                duration = getattr(attr, 'duration', None)
+                            elif attr_type in ['DocumentAttributeVideo', 'DocumentAttributeImageSize']:
+                                width = getattr(attr, 'w', None)
+                                height = getattr(attr, 'h', None)
+                
+                elif hasattr(event.media, 'photo') and event.media.photo:
+                    photo = event.media.photo
+                    if hasattr(photo, 'sizes') and photo.sizes:
+                        largest_size = max(photo.sizes, key=lambda s: getattr(s, 'w', 0) * getattr(s, 'h', 0))
+                        width = getattr(largest_size, 'w', None)
+                        height = getattr(largest_size, 'h', None)
+                
+                # Prepare media for Bot API with file cleanup
+                try:
+                    file_size = os.path.getsize(temp_file) if temp_file and os.path.exists(temp_file) else 0
+                    pair_id = getattr(pair, 'id', 'unknown')
+                    logger.info(f"[MEDIA_DEBUG] Returning media info - Type: {media_type}, File: {temp_file}, Size: {file_size} bytes, Pair: {pair_id}")
+                except Exception as size_error:
+                    logger.warning(f"[MEDIA_DEBUG] Error getting file size: {size_error}")
+                    file_size = 0
+                    pair_id = 'unknown'
+                
+                return {
+                    'type': media_type,
+                    'file_path': temp_file,
+                    'filename': filename,
+                    'duration': duration,
+                    'width': width,
+                    'height': height,
+                    'caption': event.raw_text or event.text or "",
+                    'cleanup_required': True
+                }
+                
+            except Exception as download_error:
+                # Clean up on error
+                if temp_file and os.path.exists(temp_file):
+                    try:
+                        os.unlink(temp_file)
+                    except:
+                        pass
+                import traceback
+                pair_id = getattr(pair, 'id', 'unknown')
+                logger.error(f"[MEDIA_DEBUG] Error during media download/processing - Pair: {pair_id}, Type: {media_type}, Error: {download_error}")
+                logger.error(f"[MEDIA_DEBUG] Full traceback: {traceback.format_exc()}")
+                return None
+                
+        except Exception as e:
+            import traceback
+            pair_id = getattr(pair, 'id', 'unknown')
+            logger.error(f"[MEDIA_DEBUG] Error preparing media - Pair: {pair_id}, Error: {e}")
+            logger.error(f"[MEDIA_DEBUG] Full traceback: {traceback.format_exc()}")
+            return None
+            
+    async def _download_media(self, event) -> Optional[BytesIO]:
+        """Download media from message"""
+        try:
+            # Create a BytesIO buffer
+            buffer = BytesIO()
+            
+            # Download media to buffer
+            await event.client.download_media(event.media, file=buffer)
+            buffer.seek(0)
+            
+            return buffer
+            
+        except Exception as e:
+            logger.error(f"Error downloading media: {e}")
+            return None
+    
+
+
+    async def _send_message(self, bot: Bot, chat_id: int, content: str, 
+                          media_info: Optional[Dict], reply_to_message_id: Optional[int] = None,
+                          entities: Optional[List] = None):
+        """Send message to destination chat with comprehensive media and formatting support"""
+        import time
+        send_start = time.time()
+        
+        try:
+            logger.info(f"[SEND_DEBUG] Starting message send - Chat: {chat_id}, Content length: {len(content) if content else 0}, Media: {media_info['type'] if media_info else None}")
+            
+            # Validate and convert entities for proper formatting and premium emoji support  
+            converted_entities = self._validate_and_convert_entities(content, entities or [])
+            
+            # Handle webpage preview messages
+            if media_info and media_info.get('type') == 'webpage':
+                # For webpage previews, send as text with web preview enabled
+                if content:
+                    return await bot.send_message(
+                        chat_id=chat_id,
+                        text=content,
+                        entities=converted_entities,
+                        disable_web_page_preview=False,  # Enable webpage previews
+                        reply_to_message_id=reply_to_message_id
+                    )
+                else:
+                    # If no content but has webpage info, send the URL to trigger preview
+                    webpage_url = media_info.get('url', '')
+                    if webpage_url:
+                        return await bot.send_message(
+                            chat_id=chat_id,
+                            text=webpage_url,
+                            disable_web_page_preview=False,
+                            reply_to_message_id=reply_to_message_id
+                        )
+            
+            if media_info and media_info.get('type') != 'webpage':
+                # Send media message with downloaded file
+                caption = content[:1024] if content else None
+                caption_entities = self._validate_and_convert_entities(caption, entities) if caption and entities else None
+                
+                media_type = media_info['type']
+                file_path = media_info.get('file_path')
+                file_size = os.path.getsize(file_path) if file_path and os.path.exists(file_path) else 0
+                
+                logger.info(f"[SEND_DEBUG] Media send prep - Type: {media_type}, File: {file_path}, Size: {file_size} bytes")
+                
+                if not file_path or not os.path.exists(file_path):
+                    logger.error(f"[SEND_DEBUG] Media file missing - Path: {file_path}, Exists: {os.path.exists(file_path) if file_path else False}")
+                    return None
+                
+                if file_size == 0:
+                    logger.error(f"[SEND_DEBUG] Media file is empty - Path: {file_path}")
+                    return None
+                
+                try:
+                    # Send based on media type with all attributes preserved
+                    if media_type == 'photo':
+                        logger.info(f"[SEND_DEBUG] Sending photo - Size: {file_size} bytes, Caption: {len(caption) if caption else 0} chars")
+                        try:
+                            with open(file_path, 'rb') as photo_file:
+                                result = await bot.send_photo(
+                                    chat_id=chat_id,
+                                    photo=photo_file,
+                                    caption=caption,
+                                    caption_entities=caption_entities,
+                                    reply_to_message_id=reply_to_message_id
+                                )
+                                send_time = time.time() - send_start
+                                logger.info(f"[SEND_DEBUG] Photo sent successfully - Message ID: {result.message_id}, Time: {send_time:.2f}s")
+                        except Exception as photo_error:
+                            logger.error(f"[SEND_DEBUG] Photo send failed: {photo_error}")
+                            raise photo_error
+                    elif media_type == 'video':
+                        logger.info(f"[SEND_DEBUG] Sending video - Size: {file_size} bytes, Duration: {media_info.get('duration')}")
+                        try:
+                            with open(file_path, 'rb') as video_file:
+                                result = await bot.send_video(
+                                    chat_id=chat_id,
+                                    video=video_file,
+                                    caption=caption,
+                                    caption_entities=caption_entities,
+                                    duration=media_info.get('duration'),
+                                    width=media_info.get('width'),
+                                    height=media_info.get('height'),
+                                    reply_to_message_id=reply_to_message_id
+                                )
+                                send_time = time.time() - send_start
+                                logger.info(f"[SEND_DEBUG] Video sent successfully - Message ID: {result.message_id}, Time: {send_time:.2f}s")
+                        except Exception as video_error:
+                            logger.error(f"[SEND_DEBUG] Video send failed: {video_error}")
+                            raise video_error
+                    elif media_type == 'animation':
+                        with open(file_path, 'rb') as animation_file:
+                            result = await bot.send_animation(
+                                chat_id=chat_id,
+                                animation=animation_file,
+                                caption=caption,
+                                caption_entities=caption_entities,
+                                duration=media_info.get('duration'),
+                                width=media_info.get('width'),
+                                height=media_info.get('height'),
+                                reply_to_message_id=reply_to_message_id
+                            )
+                    elif media_type == 'document':
+                        with open(file_path, 'rb') as document_file:
+                            result = await bot.send_document(
+                                chat_id=chat_id,
+                                document=document_file,
+                                filename=media_info.get('filename'),
+                                caption=caption,
+                                caption_entities=caption_entities,
+                                reply_to_message_id=reply_to_message_id
+                            )
+                    elif media_type == 'audio':
+                        with open(file_path, 'rb') as audio_file:
+                            result = await bot.send_audio(
+                                chat_id=chat_id,
+                                audio=audio_file,
+                                caption=caption,
+                                caption_entities=caption_entities,
+                                duration=media_info.get('duration'),
+                                reply_to_message_id=reply_to_message_id
+                            )
+                    elif media_type == 'voice':
+                        with open(file_path, 'rb') as voice_file:
+                            result = await bot.send_voice(
+                                chat_id=chat_id,
+                                voice=voice_file,
+                                caption=caption,
+                                caption_entities=caption_entities,
+                                duration=media_info.get('duration'),
+                                reply_to_message_id=reply_to_message_id
+                            )
+                    elif media_type == 'video_note':
+                        with open(file_path, 'rb') as video_note_file:
+                            result = await bot.send_video_note(
+                                chat_id=chat_id,
+                                video_note=video_note_file,
+                                duration=media_info.get('duration'),
+                                length=media_info.get('width', 240),  # Video notes are square
+                                reply_to_message_id=reply_to_message_id
+                            )
+                    elif media_type == 'sticker':
+                        with open(file_path, 'rb') as sticker_file:
+                            result = await bot.send_sticker(
+                                chat_id=chat_id,
+                                sticker=sticker_file,
+                                reply_to_message_id=reply_to_message_id
+                            )
+                    else:
+                        result = None
+                    
+                    # Clean up downloaded file
+                    if media_info.get('cleanup_required') and file_path and os.path.exists(file_path):
+                        try:
+                            os.unlink(file_path)
+                        except Exception as cleanup_error:
+                            logger.warning(f"Failed to cleanup temp file {file_path}: {cleanup_error}")
+                    
+                    return result
+                    
+                except Exception as send_error:
+                    # Clean up on error
+                    if media_info.get('cleanup_required') and file_path and os.path.exists(file_path):
+                        try:
+                            os.unlink(file_path)
+                        except:
+                            pass
+                    raise send_error
+
+            else:
+                # Send text message with enhanced formatting support and URL preview handling
+                if content:
+                    contains_urls = self._contains_urls(content)
+                    logger.info(f"Sending text message. Contains URLs: {contains_urls}, Content: {content[:200]}...")
+                    
+                    # For messages with URLs, ensure webpage preview is enabled
+                    # disable_web_page_preview=False means preview is ENABLED
+                    # disable_web_page_preview=True means preview is DISABLED
+                    disable_preview = not contains_urls  # False if URLs present (preview enabled), True if no URLs (preview disabled)
+                    
+                    logger.info(f"Setting disable_web_page_preview={disable_preview} for message with URLs={contains_urls}")
+                    
+                    # Send as text message (never as media) to ensure formatting is preserved and URLs work properly
+                    return await bot.send_message(
+                        chat_id=chat_id,
+                        text=content,
+                        entities=converted_entities,
+                        disable_web_page_preview=disable_preview,
+                        reply_to_message_id=reply_to_message_id,
+                        parse_mode=None  # Use entities instead of parse_mode to preserve original formatting
+                    )
+            
+            return None
+            
+        except Forbidden as e:
+            logger.error(f"Bot forbidden in chat {chat_id}: {e}")
+            return None
+        except BadRequest as e:
+            logger.error(f"Bad request sending message to chat {chat_id}: {e}")
+            
+            # Check if it's a "Chat not found" error - this usually means:
+            # 1. The bot is not a member of the destination chat
+            # 2. The chat ID is incorrect
+            # 3. The chat was deleted or made private
+            if "Chat not found" in str(e):
+                logger.error(f"CHAT ACCESS ERROR for pair with destination {chat_id}:")
+                logger.error(f"  - Bot might not be a member of the destination chat")
+                logger.error(f"  - Chat ID might be incorrect: {chat_id}")
+                logger.error(f"  - Chat might be private or deleted")
+                logger.error(f"  - Solution: Add the bot to the destination chat or check the chat ID")
+                return None
+            
+            logger.warning(f"Bad request sending message, trying fallback: {e}")
+            # Comprehensive fallback strategy
+            try:
+                if media_info and media_info.get('type') != 'webpage':
+                    caption = content[:1024] if content else None
+                    media_type = media_info['type']
+                    
+                    # Try basic media sending without advanced attributes
+                    if media_type == 'photo':
+                        return await bot.send_photo(chat_id=chat_id, photo=media_info['data'], caption=caption, reply_to_message_id=reply_to_message_id)
+                    elif media_type == 'video':
+                        return await bot.send_video(chat_id=chat_id, video=media_info['data'], caption=caption, reply_to_message_id=reply_to_message_id)
+                    elif media_type == 'animation':
+                        return await bot.send_animation(chat_id=chat_id, animation=media_info['data'], caption=caption, reply_to_message_id=reply_to_message_id)
+                    elif media_type == 'document':
+                        return await bot.send_document(chat_id=chat_id, document=media_info['data'], caption=caption, reply_to_message_id=reply_to_message_id)
+                    elif media_type == 'audio':
+                        return await bot.send_audio(chat_id=chat_id, audio=media_info['data'], caption=caption, reply_to_message_id=reply_to_message_id)
+                    elif media_type == 'voice':
+                        return await bot.send_voice(chat_id=chat_id, voice=media_info['data'], reply_to_message_id=reply_to_message_id)
+                    elif media_type == 'video_note':
+                        return await bot.send_video_note(chat_id=chat_id, video_note=media_info['data'], reply_to_message_id=reply_to_message_id)
+                    elif media_type == 'sticker':
+                        return await bot.send_sticker(chat_id=chat_id, sticker=media_info['data'], reply_to_message_id=reply_to_message_id)
+                else:
+                    # Final fallback: plain text without entities, check for URLs
+                    contains_urls = self._contains_urls(content)
+                    disable_preview = not contains_urls
+                    logger.info(f"Fallback: Setting disable_web_page_preview={disable_preview} for URLs={contains_urls}")
+                    
+                    # Ensure fallback also sends as text message with URL preview capability
+                    return await bot.send_message(
+                        chat_id=chat_id, 
+                        text=content, 
+                        reply_to_message_id=reply_to_message_id, 
+                        disable_web_page_preview=disable_preview,
+                        parse_mode=None  # No parse mode to avoid formatting conflicts
+                    )
+            except Exception as fallback_error:
+                logger.error(f"All fallback attempts failed: {fallback_error}")
+                return None
+        except Exception as e:
+            logger.error(f"Error sending message: {e}")
+            return None
+
+    def _validate_and_convert_entities(self, text: str, entities: List) -> List:
+        """Validate entities against text and convert them with comprehensive bounds checking"""
+        if not text or not entities:
+            return []
+        
+        try:
+            # Calculate text length in UTF-16 units (Telegram's standard)
+            text_bytes = text.encode('utf-16-le')
+            text_length = len(text_bytes) // 2
+            
+            # Convert entities first
+            converted_entities = self._convert_entities_for_telegram(entities)
+            
+            # Validate and adjust entities with bounds checking
+            valid_entities = []
+            for entity in converted_entities:
+                if not hasattr(entity, 'offset') or not hasattr(entity, 'length'):
+                    continue
+                    
+                offset = entity.offset
+                length = entity.length
+                
+                # Skip invalid entities
+                if offset < 0 or length <= 0:
+                    continue
+                
+                # Adjust entities that exceed text bounds
+                if offset >= text_length:
+                    continue  # Entity starts beyond text
+                
+                if offset + length > text_length:
+                    # Truncate entity to fit within text bounds
+                    adjusted_length = text_length - offset
+                    if adjusted_length > 0:
+                        # Create new entity with adjusted length
+                        adjusted_entity = MessageEntity(
+                            entity.type,
+                            offset,
+                            adjusted_length,
+                            url=getattr(entity, 'url', None),
+                            user=getattr(entity, 'user', None),
+                            language=getattr(entity, 'language', None),
+                            custom_emoji_id=getattr(entity, 'custom_emoji_id', None)
+                        )
+                        valid_entities.append(adjusted_entity)
+                        logger.debug(f"Adjusted entity length from {length} to {adjusted_length}")
+                else:
+                    valid_entities.append(entity)
+            
+            # Sort entities by offset to maintain order
+            valid_entities.sort(key=lambda e: e.offset)
+            
+            return valid_entities
+            
+        except Exception as e:
+            logger.error(f"Error validating entities: {e}")
+            return []
+    
+    async def _find_reply_target(self, event, pair: MessagePair) -> Optional[int]:
+        """Find the destination message ID for reply"""
+        try:
+            if not event.reply_to_msg_id:
+                return None
+            
+            # Look up the original message mapping
+            mapping = await self.db_manager.get_message_mapping(event.reply_to_msg_id, pair.id)
+            if mapping:
+                return mapping.destination_message_id
+            
+            return None
+            
+        except Exception as e:
+            logger.error(f"Error finding reply target: {e}")
+            return None
+    
+    def _get_message_type(self, event) -> str:
+        """Determine message type"""
+        if event.media:
+            return self._get_media_type(event.media)
+        return "text"
+    
+    def _get_media_type(self, media) -> str:
+        """Determine media type with enhanced detection"""
+        try:
+            if isinstance(media, MessageMediaPhoto):
+                return "photo"
+            elif isinstance(media, MessageMediaDocument):
+                document = getattr(media, 'document', None)
+                if not document:
+                    return "document"
+                
+                # Safely check document attributes first for specific type detection
+                if getattr(document, 'attributes', None):
+                    for attr in document.attributes:
+                        attr_type = type(attr).__name__
+                        
+                        if attr_type == 'DocumentAttributeSticker':
+                            return "sticker"
+                        elif attr_type == 'DocumentAttributeAnimated':
+                            return "animation"
+                        elif attr_type == 'DocumentAttributeVideo':
+                            if getattr(attr, 'round_message', False):
+                                return "video_note"
+                            return "video"
+                        elif attr_type == 'DocumentAttributeAudio':
+                            if getattr(attr, 'voice', False):
+                                return "voice"
+                            return "audio"
+                
+                # Check MIME type as fallback
+                mime_type = getattr(document, 'mime_type', None)
+                if mime_type:
+                    mime_type = mime_type.lower()
+                    
+                    # Image types
+                    if mime_type.startswith('image/'):
+                        if 'gif' in mime_type:
+                            return "animation"
+                        return "photo"
+                    
+                    # Video types
+                    elif mime_type.startswith('video/'):
+                        return "video"
+                    
+                    # Audio types
+                    elif mime_type.startswith('audio/'):
+                        return "audio"
+                
+                return "document"
+            
+            # Handle web page media
+            elif hasattr(media, '__class__') and 'MessageMediaWebPage' in str(media.__class__):
+                return "webpage"
+            
+            return "unknown"
+            
+        except Exception as e:
+            logger.error(f"Error determining media type: {e}")
+            return "unknown"
+    
+    def _remove_mentions(self, text: str, placeholder: str) -> str:
+        """Enhanced mention removal with comprehensive pattern matching and clean formatting"""
+        if not text:
+            return text
+        try:
+            original_text = text
+            
+            # Step 1: Handle mentions in parentheses - remove entire parentheses
+            text = re.sub(r'\(\s*@[a-zA-Z0-9_]{1,32}\s*\)', '', text)
+            
+            # Step 2: Handle @mentions preceded by punctuation - clean up punctuation  
+            text = re.sub(r'([,\.;:!?]\s*)@[a-zA-Z0-9_]{1,32}\b', r'\1', text)
+            
+            # Step 3: Handle standard @mentions (but not email addresses) - replace with placeholder or remove
+            if placeholder:
+                # Match @mentions at word boundaries, but not after alphanumeric chars (emails)
+                text = re.sub(r'(?<!\w)@[a-zA-Z0-9_]{1,32}\b', placeholder, text)
+            else:
+                text = re.sub(r'(?<!\w)@[a-zA-Z0-9_]{1,32}\b', '', text)
+            
+            # Step 4: Handle user ID links
+            text = re.sub(r'tg://user\?id=\d+', placeholder if placeholder else '', text)
+            
+            # Clean up formatting issues
+            if placeholder:
+                # Remove duplicate placeholders
+                text = re.sub(f'{re.escape(placeholder)}(\\s*{re.escape(placeholder)})+', placeholder, text)
+                # Clean up extra spaces around placeholders
+                text = re.sub(f'\\s+{re.escape(placeholder)}\\s+', f' {placeholder} ', text)
+                text = re.sub(f'^\\s*{re.escape(placeholder)}\\s*', f'{placeholder} ', text)
+                text = re.sub(f'\\s*{re.escape(placeholder)}\\s*$', f' {placeholder}', text)
+            
+            # Clean up excessive spaces and trailing punctuation left behind
+            text = re.sub(r'\s*,\s*,\s*', ', ', text)  # Fix double commas
+            text = re.sub(r'\s*,\s*$', '', text)  # Remove trailing comma
+            text = re.sub(r'^\s*,\s*', '', text)  # Remove leading comma
+            text = re.sub(r'\s+', ' ', text)  # Multiple spaces to single space
+            text = text.strip()
+            
+            # If result is empty or only placeholder, return original
+            if not text or (placeholder and text == placeholder):
+                return original_text
+            
+            return text
+            
+        except Exception as e:
+            logger.error(f"Error removing mentions: {e}")
+            return text
+    
+    def _remove_headers(self, text: str, patterns: List[str]) -> str:
+        """Enhanced header removal with exact phrase matching at beginning of message"""
+        if not text:
+            return text
+            
+        original_text = text
+        
+        # Conservative exact-match patterns if none provided
+        if not patterns:
+            exact_header_patterns = [
+                r'^🔥\s*VIP\s*ENTRY\b.*?$',      # Exact: "🔥 VIP ENTRY"
+                r'^📢\s*SIGNAL\s*ALERT\b.*?$',   # Exact: "📢 SIGNAL ALERT"
+                r'^VIP\s*Channel\b.*?$',         # Exact: "VIP Channel"
+                r'^📊\s*Analysis\b.*?$',         # Exact: "📊 Analysis"
+                r'^🚨\s*Alert\b.*?$',            # Exact: "🚨 Alert"
+                r'^🔚\s*END\b.*?$',              # Exact: "🔚 END"
+            ]
+            patterns = exact_header_patterns
+        
+        # Process headers at beginning of message only
+        lines = text.split('\n')
+        filtered_lines = []
+        header_section = True  # Track if we're still in header section
+        
+        for line in lines:
+            line_removed = False
+            
+            # Only check for headers at the beginning of the message
+            if header_section and line.strip():
+                # Check each pattern against the current line
+                for pattern in patterns:
+                    try:
+                        # Create exact match pattern for headers
+                        # Match the exact phrase at start of line
+                        if re.match(pattern, line.strip(), re.IGNORECASE):
+                            line_removed = True
+                            logger.debug(f"Header removed: '{line}' matched pattern: {pattern}")
+                            break
+                    except re.error as e:
+                        logger.warning(f"Invalid header pattern '{pattern}': {e}")
+                        continue
+                
+                # Once we encounter a non-header line, stop looking for headers
+                if not line_removed:
+                    header_section = False
+            
+            # Keep lines that don't match header patterns
+            if not line_removed:
+                filtered_lines.append(line)
+        
+        # Rejoin lines preserving original formatting
+        result_text = '\n'.join(filtered_lines)
+        
+        # Clean up leading whitespace but preserve formatting
+        result_text = result_text.lstrip()
+        
+        # Return original if result is empty
+        if not result_text or result_text.isspace():
+            return original_text
+        
+        return result_text
+    
+    def _remove_footers(self, text: str, patterns: List[str]) -> str:
+        """Enhanced footer removal with exact phrase matching at end of message"""
+        if not text:
+            return text
+            
+        original_text = text
+        
+        # Conservative exact-match patterns if none provided
+        if not patterns:
+            exact_footer_patterns = [
+                r'^🔚\s*END\b.*?$',              # Exact: "🔚 END"
+                r'^👉\s*Join\b.*?$',             # Exact: "👉 Join our VIP channel"
+                r'^Contact\s*@admin\b.*?$',      # Exact: "Contact @admin for more info"
+                r'^📱\s*Contact\b.*?$',          # Exact: "📱 Contact us"
+                r'^💌\s*Subscribe\b.*?$',        # Exact: "💌 Subscribe to"
+            ]
+            patterns = exact_footer_patterns
+        
+        # Process footers at end of message only
+        lines = text.split('\n')
+        filtered_lines = list(lines)
+        
+        # Process lines from bottom to top to remove footers cleanly
+        footer_section = True  # Track if we're still in footer section
+        
+        for i in range(len(lines) - 1, -1, -1):
+            line = lines[i]
+            line_removed = False
+            
+            # Only check for footers at the end of the message
+            if footer_section and line.strip():
+                # Check each pattern against the current line
+                for pattern in patterns:
+                    try:
+                        # Create exact match pattern for footers
+                        # Match the exact phrase at start of line (footers are typically single lines)
+                        if re.match(pattern, line.strip(), re.IGNORECASE):
+                            # Remove this line from the filtered list
+                            if i < len(filtered_lines):
+                                filtered_lines.pop(i)
+                                line_removed = True
+                                logger.debug(f"Footer removed: '{line}' matched pattern: {pattern}")
+                                break
+                    except re.error as e:
+                        logger.warning(f"Invalid footer pattern '{pattern}': {e}")
+                        continue
+                
+                # Once we encounter a non-footer line, stop looking for footers
+                if not line_removed:
+                    footer_section = False
+            # Skip empty lines while in footer section
+            elif not line.strip():
+                continue
+            else:
+                footer_section = False
+        
+        # Rejoin lines preserving original formatting
+        result_text = '\n'.join(filtered_lines)
+        
+        # Clean up trailing whitespace but preserve formatting
+        result_text = result_text.rstrip()
+        
+        # Return original if result is empty
+        if not result_text or result_text.isspace():
+            return original_text
+        
+        return result_text
+    
+    def _convert_entities_for_telegram(self, entities: List) -> List:
+        """Convert Telethon entities to python-telegram-bot format with comprehensive validation"""
+        try:
+            from telegram import MessageEntity
+            
+            if not entities:
+                return []
+            
+            converted_entities = []
+            
+            for entity in entities:
+                entity_type = None
+                try:
+                    # Get entity type safely
+                    if hasattr(entity, '__class__'):
+                        entity_type = entity.__class__.__name__
+                    else:
+                        entity_type = str(type(entity)).split('.')[-1].replace("'", "").replace(">", "")
+                    
+                    offset = getattr(entity, 'offset', 0)
+                    length = getattr(entity, 'length', 0)
+                    
+                    # Validate entity bounds
+                    if offset < 0 or length <= 0:
+                        continue
+                    
+                    # Map Telethon entity types to Telegram entity types with comprehensive coverage
+                    if 'MessageEntityBold' in entity_type or 'Bold' in entity_type:
+                        converted_entities.append(MessageEntity(MessageEntity.BOLD, offset, length))
+                    elif 'MessageEntityItalic' in entity_type or 'Italic' in entity_type:
+                        converted_entities.append(MessageEntity(MessageEntity.ITALIC, offset, length))
+                    elif 'MessageEntityCode' in entity_type or 'Code' in entity_type:
+                        converted_entities.append(MessageEntity(MessageEntity.CODE, offset, length))
+                    elif 'MessageEntityPre' in entity_type or 'Pre' in entity_type:
+                        language = getattr(entity, 'language', None)
+                        converted_entities.append(MessageEntity(MessageEntity.PRE, offset, length, language=language))
+                    elif 'MessageEntityStrike' in entity_type or 'Strike' in entity_type:
+                        converted_entities.append(MessageEntity(MessageEntity.STRIKETHROUGH, offset, length))
+                    elif 'MessageEntityUnderline' in entity_type or 'Underline' in entity_type:
+                        converted_entities.append(MessageEntity(MessageEntity.UNDERLINE, offset, length))
+                    elif 'MessageEntitySpoiler' in entity_type or 'Spoiler' in entity_type:
+                        converted_entities.append(MessageEntity(MessageEntity.SPOILER, offset, length))
+                    elif 'MessageEntityUrl' in entity_type or 'Url' in entity_type:
+                        converted_entities.append(MessageEntity(MessageEntity.URL, offset, length))
+                    elif 'MessageEntityTextUrl' in entity_type or 'TextUrl' in entity_type:
+                        url = getattr(entity, 'url', '')
+                        if url:
+                            converted_entities.append(MessageEntity(MessageEntity.TEXT_LINK, offset, length, url=url))
+                    elif 'MessageEntityMention' in entity_type or 'Mention' in entity_type:
+                        converted_entities.append(MessageEntity(MessageEntity.MENTION, offset, length))
+                    elif 'MessageEntityMentionName' in entity_type or 'MentionName' in entity_type:
+                        user_id = getattr(entity, 'user_id', None)
+                        if user_id:
+                            converted_entities.append(MessageEntity(MessageEntity.TEXT_MENTION, offset, length, user=user_id))
+                    elif 'MessageEntityCustomEmoji' in entity_type or 'CustomEmoji' in entity_type:
+                        custom_emoji_id = getattr(entity, 'document_id', '')
+                        if custom_emoji_id:
+                            converted_entities.append(MessageEntity(MessageEntity.CUSTOM_EMOJI, offset, length, custom_emoji_id=str(custom_emoji_id)))
+                    elif 'MessageEntityHashtag' in entity_type or 'Hashtag' in entity_type:
+                        converted_entities.append(MessageEntity(MessageEntity.HASHTAG, offset, length))
+                    elif 'MessageEntityCashtag' in entity_type or 'Cashtag' in entity_type:
+                        converted_entities.append(MessageEntity(MessageEntity.CASHTAG, offset, length))
+                    elif 'MessageEntityBotCommand' in entity_type or 'BotCommand' in entity_type:
+                        converted_entities.append(MessageEntity(MessageEntity.BOT_COMMAND, offset, length))
+                    elif 'MessageEntityEmail' in entity_type or 'Email' in entity_type:
+                        converted_entities.append(MessageEntity(MessageEntity.EMAIL, offset, length))
+                    elif 'MessageEntityPhone' in entity_type or 'Phone' in entity_type:
+                        converted_entities.append(MessageEntity(MessageEntity.PHONE_NUMBER, offset, length))
+                    else:
+                        # Log unknown entity types for future enhancement
+                        logger.debug(f"Unknown entity type: {entity_type}")
+                        
+                except Exception as entity_error:
+                    logger.warning(f"Failed to convert entity {entity_type or 'unknown'}: {entity_error}")
+                    continue
+            
+            return converted_entities
+            
+        except Exception as e:
+            logger.error(f"Error converting entities: {e}")
+            return []
+    
+    def get_stats(self) -> Dict[str, int]:
+        """Get processing statistics"""
+        return self.stats.copy()
+    
+    def is_blocked_word(self, text: str, pair: Optional[MessagePair] = None) -> bool:
+        """
+        Check if text contains blocked words (global or pair-specific)
+        Returns True if the message should be blocked
+        """
+        if not text:
+            return False
+        
+        text_lower = text.lower().strip()
+        
+        # Check global blocked words from config first
+        BLOCKED_WORDS = getattr(self.config, 'GLOBAL_BLOCKED_WORDS', None)
+        if BLOCKED_WORDS is None:
+            # Fallback to environment variable or default list
+            import os
+            env_words = os.getenv('GLOBAL_BLOCKED_WORDS', '')
+            if env_words:
+                BLOCKED_WORDS = [word.strip() for word in env_words.split(',') if word.strip()]
+            else:
+                BLOCKED_WORDS = [
+                    "join", "promo", "subscribe", "contact", "spam", "advertisement", 
+                    "click here", "free", "limited time", "act now", "don't miss"
+                ]
+        
+        # Check global blocked words
+        if BLOCKED_WORDS:
+            for word in BLOCKED_WORDS:
+                if isinstance(word, str) and word.strip():
+                    word_lower = word.strip().lower()
+                    if word_lower in text_lower:
+                        logger.info(f"Text blocked for global word: '{word}' found in: {text[:100]}...")
+                        return True
+        
+        # Check pair-specific blocked words
+        if pair:
+            pair_blocked_words = pair.filters.get("blocked_words", [])
+            if pair_blocked_words:
+                for word in pair_blocked_words:
+                    if isinstance(word, str) and word.strip():
+                        word_lower = word.strip().lower()
+                        if word_lower in text_lower:
+                            logger.info(f"Text blocked for pair {pair.id} word: '{word}' found in: {text[:100]}...")
+                            return True
+        
+        return False
+
+    def _remove_mentions_from_text(self, text: str, placeholder: str = "[User]") -> str:
+        """Remove mentions from text and replace with placeholder"""
+        if not text:
+            return text
+        
+        # Pattern to match @username mentions  
+        mention_pattern = r'@\w+'
+        return re.sub(mention_pattern, placeholder, text)
+    
+    def _remove_header_footer(self, text: str, header_pattern: Optional[str] = None, footer_pattern: Optional[str] = None) -> str:
+        """Remove header and footer from text using regex patterns"""
+        if not text:
+            return text
+        
+        filtered_text = text
+        
+        # Remove header
+        if header_pattern:
+            try:
+                compiled_header = re.compile(header_pattern, re.IGNORECASE | re.MULTILINE)
+                match = compiled_header.search(filtered_text)
+                if match:
+                    # Remove header
+                    header_end = match.end()
+                    filtered_text = filtered_text[header_end:].strip()
+            except re.error as e:
+                logger.warning(f"Invalid header regex pattern {header_pattern}: {e}")
+        
+        # Remove footer
+        if footer_pattern:
+            try:
+                compiled_footer = re.compile(footer_pattern, re.IGNORECASE | re.MULTILINE)
+                match = compiled_footer.search(filtered_text)
+                if match:
+                    # Remove footer
+                    footer_start = match.start()
+                    filtered_text = filtered_text[:footer_start].strip()
+            except re.error as e:
+                logger.warning(f"Invalid footer regex pattern {footer_pattern}: {e}")
+        
+        return filtered_text
+    
+    def _contains_urls(self, text: str) -> bool:
+        """Check if text contains URLs that should have webpage previews"""
+        if not text:
+            return False
+        
+        import re
+        # Enhanced URL patterns that typically generate webpage previews
+        url_patterns = [
+            r'https?://[^\s<>")\]]+',                       # HTTP/HTTPS URLs (exclude ) and ])
+            r'www\.[^\s<>")\]]+\.[a-zA-Z]{2,}[^\s<>")\]]*', # www URLs with domain and optional path
+            r't\.me/[^\s<>")\]]+',                          # Telegram links
+            r'(?<![a-zA-Z0-9@])[a-zA-Z0-9.-]+\.(com|org|net|edu|gov|co|io|tv|me|ly|to|cc|repl|dev|app)[^\s<>")\]]*', # Common TLD URLs (exclude emails)
+            r'ftp://[^\s<>")\]]+',                          # FTP URLs
+            r'[a-zA-Z0-9.-]+\.replit\.com[^\s<>")\]]*',     # Replit URLs
+            r'[a-zA-Z0-9.-]+\.replit\.app[^\s<>")\]]*',     # Replit app URLs
+        ]
+        
+        # Check for markdown-style links: [text](url)
+        markdown_link_pattern = r'\[([^\]]+)\]\(([^)]+)\)'
+        markdown_matches = re.findall(markdown_link_pattern, text)
+        if markdown_matches:
+            for link_text, link_url in markdown_matches:
+                # Check if the URL part contains a valid URL
+                for pattern in url_patterns:
+                    if re.search(pattern, link_url, re.IGNORECASE):
+                        logger.info(f"Found markdown URL in text: [{link_text}]({link_url})")
+                        return True
+        
+        # Check for regular URL patterns
+        for pattern in url_patterns:
+            match = re.search(pattern, text, re.IGNORECASE)
+            if match:
+                logger.info(f"Found URL pattern '{pattern}' in text: {text[:200]}... (matched: {match.group()})")
+                return True
+        
+        logger.debug(f"No URL patterns found in text: {text[:200]}...")
         return False
     
-    def _get_uptime(self) -> str:
-        """Get system uptime"""
-        # This would be calculated from start time
-        return "Running"
+    def _contains_simple_urls(self, text: str) -> bool:
+        """Fallback check for simple URL patterns"""
+        if not text:
+            return False
+        
+        import re
+        # Simple patterns for URLs that might be missed
+        simple_patterns = [
+            r'[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}(/[^\s]*)?',     # Basic domain.tld pattern
+            r'(?:^|\s)([\w.-]+\.[\w]{2,})(?:\s|$)',        # Domain at word boundaries
+        ]
+        
+        # Also check inside markdown links
+        markdown_link_pattern = r'\[([^\]]+)\]\(([^)]+)\)'
+        markdown_matches = re.findall(markdown_link_pattern, text)
+        if markdown_matches:
+            for link_text, link_url in markdown_matches:
+                for pattern in simple_patterns:
+                    if re.search(pattern, link_url, re.IGNORECASE):
+                        logger.info(f"Found simple URL in markdown: [{link_text}]({link_url})")
+                        return True
+        
+        for pattern in simple_patterns:
+            if re.search(pattern, text, re.IGNORECASE):
+                return True
+        
+        return False
     
-    def _get_memory_usage(self) -> str:
-        """Get memory usage"""
-        try:
-            import psutil
-            process = psutil.Process()
-            memory_mb = process.memory_info().rss / 1024 / 1024
-            return f"{memory_mb:.1f} MB"
-        except ImportError:
-            return "N/A"
-    
-    # Public methods for external access
-    async def reload_pairs(self):
-        """Reload pairs from database"""
-        await self._load_pairs()
-    
-    def get_metrics(self) -> Dict[int, BotMetrics]:
-        """Get bot metrics"""
-        return self.bot_metrics.copy()
-    
-    def get_queue_size(self) -> int:
-        """Get current queue size"""
-        return self.message_queue.qsize()
-
-    # Bot Token Management Commands
-    async def _cmd_add_token(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Add a new bot token"""
-        if not self._is_admin(update.effective_user.id):
-            return
+    async def is_blocked_image(self, event, pair: MessagePair) -> bool:
+        """
+        Global function to check if image should be blocked using pHash
+        Returns True if the image should be blocked
+        """
+        if not event.media:
+            return False
         
         try:
-            if len(context.args) < 2:
-                await update.message.reply_text(
-                    "Usage: /addtoken <name> <token>\n"
-                    "Example: /addtoken MyBot 1234567890:ABCdefGHIjklMNOPqrs"
-                )
-                return
-            
-            name = context.args[0]
-            token = context.args[1]
-            
-            # Validate token format
-            if not token.count(':') == 1 or len(token.split(':')[0]) < 8:
-                await update.message.reply_text("❌ Invalid token format. Token should be like: 1234567890:ABCdefGHIjklMNOPqrs")
-                return
-            
-            # Test the token by getting bot info
-            try:
-                test_bot = Bot(token)
-                bot_info = await test_bot.get_me()
-                username = bot_info.username
-            except Exception as e:
-                await update.message.reply_text(f"❌ Invalid token or bot unreachable: {e}")
-                return
-            
-            # Save token to database
-            token_id = await self.db_manager.save_bot_token(name, token, username)
-            
-            await update.message.reply_text(
-                f"✅ Bot token added successfully!\n"
-                f"Name: {name}\n"
-                f"Username: @{username}\n"
-                f"ID: {token_id}"
-            )
-            
+            # Use the existing image handler logic
+            return await self.image_handler.is_image_blocked(event, pair)
         except Exception as e:
-            await update.message.reply_text(f"❌ Error adding token: {e}")
-
-    async def _cmd_list_tokens(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """List all bot tokens"""
-        if not self._is_admin(update.effective_user.id):
-            return
-        
-        try:
-            show_all = len(context.args) > 0 and context.args[0] == "--all"
-            tokens = await self.db_manager.get_bot_tokens(active_only=not show_all)
-            
-            if not tokens:
-                await update.message.reply_text("No bot tokens found.")
-                return
-            
-            tokens_text = "🤖 Bot Tokens:\n\n"
-            for token in tokens:
-                status = "✅ Active" if token['is_active'] else "❌ Inactive"
-                usage = token['usage_count'] or 0
-                last_used = token['last_used'] or "Never"
-                
-                tokens_text += f"{token['name']} (ID: {token['id']})\n"
-                tokens_text += f"   @{token['username']} - {status}\n"
-                tokens_text += f"   Used: {usage} times, Last: {last_used}\n\n"
-            
-            await update.message.reply_text(tokens_text)
-            
-        except Exception as e:
-            await update.message.reply_text(f"❌ Error listing tokens: {e}")
-
-    async def _cmd_delete_token(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Delete a bot token"""
-        if not self._is_admin(update.effective_user.id):
-            return
-        
-        try:
-            if len(context.args) < 1:
-                await update.message.reply_text("Usage: /deletetoken <token_id>")
-                return
-            
-            token_id = int(context.args[0])
-            
-            # Check if token exists
-            token = await self.db_manager.get_bot_token_string_by_id(token_id)
-            if not token:
-                await update.message.reply_text("❌ Token not found.")
-                return
-            
-            # Delete token
-            success = await self.db_manager.delete_bot_token(token_id)
-            
-            if success:
-                await update.message.reply_text(
-                    f"✅ Deleted token: {token['name']} (@{token['username']})"
-                )
-            else:
-                await update.message.reply_text("❌ Failed to delete token.")
-                
-        except ValueError:
-            await update.message.reply_text("❌ Invalid token ID. Please use a number.")
-        except Exception as e:
-            await update.message.reply_text(f"❌ Error deleting token: {e}")
-
-    async def _cmd_toggle_token(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Toggle bot token active status"""
-        if not self._is_admin(update.effective_user.id):
-            return
-        
-        try:
-            if len(context.args) < 1:
-                await update.message.reply_text("Usage: /toggletoken <token_id>")
-                return
-            
-            token_id = int(context.args[0])
-            
-            # Check if token exists
-            token = await self.db_manager.get_bot_token_string_by_id(token_id)
-            if not token:
-                await update.message.reply_text("❌ Token not found.")
-                return
-            
-            # Toggle status
-            success = await self.db_manager.toggle_bot_token_status(token_id)
-            
-            if success:
-                new_status = "Active" if not token['is_active'] else "Inactive"
-                await update.message.reply_text(
-                    f"✅ Token {token['name']} is now {new_status}"
-                )
-            else:
-                await update.message.reply_text("❌ Failed to toggle token status.")
-                
-        except ValueError:
-            await update.message.reply_text("❌ Invalid token ID. Please use a number.")
-        except Exception as e:
-            await update.message.reply_text(f"❌ Error toggling token: {e}")
-
-    # User management and subscription command implementations
-    async def _resolve_user_id(self, user_input: str) -> Optional[int]:
-        """Resolve user ID from username or numeric ID using Telethon"""
-        try:
-            # If it's already a number, return it
-            if user_input.isdigit():
-                return int(user_input)
-            
-            # Remove @ if present
-            username = user_input.lstrip('@')
-            
-            if self.telethon_client and self.telethon_client.is_connected():
-                try:
-                    entity = await self.telethon_client.get_entity(username)
-                    return entity.id
-                except Exception as e:
-                    logger.warning(f"Failed to resolve username {username}: {e}")
-                    return None
-        except Exception as e:
-            logger.error(f"Error resolving user ID for {user_input}: {e}")
-        return None
-
-    async def _kick_user_from_channels(self, user_id: int, duration_seconds: Optional[int] = None) -> Tuple[int, int]:
-        """Kick user from all channels, returns (success_count, total_count)"""
-        destinations = await self.db_manager.get_all_unique_destinations()
-        success_count = 0
-        total_count = len(destinations)
-        
-        for dest_chat_id, bot_token_id in destinations:
-            try:
-                # Get the appropriate bot token
-                if bot_token_id:
-                    bot_token = await self.db_manager.get_bot_token_string_by_id(bot_token_id)
-                    if not bot_token:
-                        logger.warning(f"Bot token {bot_token_id} not found for channel {dest_chat_id}")
-                        continue
-                    bot = Bot(token=bot_token)
-                else:
-                    # Use the first available bot if no specific bot is assigned
-                    if not self.telegram_bots:
-                        logger.warning("No bots available for kicking")
-                        continue
-                    bot = self.telegram_bots[0]
-                
-                # Kick the user
-                await bot.ban_chat_member(chat_id=dest_chat_id, user_id=user_id)
-                success_count += 1
-                logger.info(f"Successfully kicked user {user_id} from channel {dest_chat_id}")
-                
-                # If duration is specified, schedule unban
-                if duration_seconds:
-                    asyncio.create_task(self._schedule_unban(bot, dest_chat_id, user_id, duration_seconds))
-                
-                # Small delay to avoid rate limiting
-                await asyncio.sleep(0.1)
-                
-            except Exception as e:
-                logger.error(f"Failed to kick user {user_id} from channel {dest_chat_id}: {e}")
-        
-        return success_count, total_count
-
-    async def _schedule_unban(self, bot: Bot, chat_id: int, user_id: int, delay_seconds: int):
-        """Schedule an unban after specified delay"""
-        try:
-            await asyncio.sleep(delay_seconds)
-            await bot.unban_chat_member(chat_id=chat_id, user_id=user_id)
-            logger.info(f"Successfully unbanned user {user_id} from channel {chat_id} after {delay_seconds} seconds")
-        except Exception as e:
-            logger.error(f"Failed to unban user {user_id} from channel {chat_id}: {e}")
-
-    async def _unban_user_from_channels(self, user_id: int) -> Tuple[int, int]:
-        """Unban user from all channels, returns (success_count, total_count)"""
-        destinations = await self.db_manager.get_all_unique_destinations()
-        success_count = 0
-        total_count = len(destinations)
-        
-        for dest_chat_id, bot_token_id in destinations:
-            try:
-                # Get the appropriate bot token
-                if bot_token_id:
-                    bot_token = await self.db_manager.get_bot_token_string_by_id(bot_token_id)
-                    if not bot_token:
-                        logger.warning(f"Bot token {bot_token_id} not found for channel {dest_chat_id}")
-                        continue
-                    bot = Bot(token=bot_token)
-                else:
-                    # Use the first available bot if no specific bot is assigned
-                    if not self.telegram_bots:
-                        logger.warning("No bots available for unbanning")
-                        continue
-                    bot = self.telegram_bots[0]
-                
-                # Unban the user
-                await bot.unban_chat_member(chat_id=dest_chat_id, user_id=user_id)
-                success_count += 1
-                logger.info(f"Successfully unbanned user {user_id} from channel {dest_chat_id}")
-                
-                # Small delay to avoid rate limiting
-                await asyncio.sleep(0.1)
-                
-            except Exception as e:
-                logger.error(f"Failed to unban user {user_id} from channel {dest_chat_id}: {e}")
-        
-        return success_count, total_count
-
-    async def _cmd_kick_all(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Admin command: /kickall <user_id|@username> [duration_seconds]"""
-        if not update.effective_user or not self._is_admin(update.effective_user.id):
-            return
-
-        try:
-            if len(context.args) < 1:
-                await update.message.reply_text(
-                    "Usage: /kickall <user_id|@username> [duration_seconds]\n"
-                    "Examples:\n"
-                    "• /kickall 123456789\n"
-                    "• /kickall @username\n"
-                    "• /kickall 123456789 3600  # kick for 1 hour"
-                )
-                return
-
-            user_input = context.args[0]
-            duration_seconds = int(context.args[1]) if len(context.args) > 1 else None
-
-            # Resolve user ID
-            user_id = await self._resolve_user_id(user_input)
-            if not user_id:
-                await update.message.reply_text("❌ Could not resolve user ID from the provided input.")
-                return
-
-            await update.message.reply_text(f"🔄 Kicking user {user_id} from all channels...")
-
-            # Kick user from all channels
-            success_count, total_count = await self._kick_user_from_channels(user_id, duration_seconds)
-
-            duration_text = f" for {duration_seconds} seconds" if duration_seconds else ""
-            await update.message.reply_text(
-                f"✅ Kicked user {user_id} from {success_count}/{total_count} channels{duration_text}."
-            )
-
-        except ValueError:
-            await update.message.reply_text("❌ Invalid duration. Please use a number for seconds.")
-        except Exception as e:
-            await update.message.reply_text(f"❌ Error during mass kick: {e}")
-            logger.error(f"Error in kickall command: {e}")
-
-    async def _cmd_unban_all(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Admin command: /unbanall <user_id|@username>"""
-        if not update.effective_user or not self._is_admin(update.effective_user.id):
-            return
-
-        try:
-            if len(context.args) < 1:
-                await update.message.reply_text(
-                    "Usage: /unbanall <user_id|@username>\n"
-                    "Examples:\n"
-                    "• /unbanall 123456789\n"
-                    "• /unbanall @username"
-                )
-                return
-
-            user_input = context.args[0]
-
-            # Resolve user ID
-            user_id = await self._resolve_user_id(user_input)
-            if not user_id:
-                await update.message.reply_text("❌ Could not resolve user ID from the provided input.")
-                return
-
-            await update.message.reply_text(f"🔄 Unbanning user {user_id} from all channels...")
-
-            # Unban user from all channels
-            success_count, total_count = await self._unban_user_from_channels(user_id)
-
-            await update.message.reply_text(
-                f"✅ Unbanned user {user_id} from {success_count}/{total_count} channels."
-            )
-
-        except Exception as e:
-            await update.message.reply_text(f"❌ Error during mass unban: {e}")
-            logger.error(f"Error in unbanall command: {e}")
-
-    async def _cmd_add_subscription(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Admin command: /addsub <user_id|@username> <days>"""
-        if not update.effective_user or not self._is_admin(update.effective_user.id):
-            return
-
-        try:
-            if len(context.args) < 2:
-                await update.message.reply_text(
-                    "Usage: /addsub <user_id|@username> <days> [notes]\n"
-                    "Examples:\n"
-                    "• /addsub 123456789 30\n"
-                    "• /addsub @username 7 Premium trial"
-                )
-                return
-
-            user_input = context.args[0]
-            days = int(context.args[1])
-            notes = " ".join(context.args[2:]) if len(context.args) > 2 else ""
-
-            # Resolve user ID
-            user_id = await self._resolve_user_id(user_input)
-            if not user_id:
-                await update.message.reply_text("❌ Could not resolve user ID from the provided input.")
-                return
-
-            # Calculate expiry date
-            expires_at = (datetime.now() + timedelta(days=days)).isoformat()
-
-            # Add subscription
-            success = await self.db_manager.add_or_update_subscription(
-                user_id=user_id,
-                expires_at=expires_at,
-                added_by=update.effective_user.id,
-                notes=notes
-            )
-
-            if success:
-                await update.message.reply_text(
-                    f"✅ Added subscription for user {user_id}\n"
-                    f"Duration: {days} days\n"
-                    f"Expires: {expires_at[:19].replace('T', ' ')}\n"
-                    f"Notes: {notes if notes else 'None'}"
-                )
-            else:
-                await update.message.reply_text("❌ Failed to add subscription.")
-
-        except ValueError:
-            await update.message.reply_text("❌ Invalid number of days. Please use a number.")
-        except Exception as e:
-            await update.message.reply_text(f"❌ Error adding subscription: {e}")
-            logger.error(f"Error in addsub command: {e}")
-
-    async def _cmd_renew_subscription(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Admin command: /renewsub <user_id|@username> <days>"""
-        if not update.effective_user or not self._is_admin(update.effective_user.id):
-            return
-
-        try:
-            if len(context.args) < 2:
-                await update.message.reply_text(
-                    "Usage: /renewsub <user_id|@username> <days>\n"
-                    "Examples:\n"
-                    "• /renewsub 123456789 30\n"
-                    "• /renewsub @username 7"
-                )
-                return
-
-            user_input = context.args[0]
-            days = int(context.args[1])
-
-            # Resolve user ID
-            user_id = await self._resolve_user_id(user_input)
-            if not user_id:
-                await update.message.reply_text("❌ Could not resolve user ID from the provided input.")
-                return
-
-            # Renew subscription
-            success = await self.db_manager.renew_subscription(user_id, days)
-
-            if success:
-                await update.message.reply_text(
-                    f"✅ Renewed subscription for user {user_id} by {days} days."
-                )
-            else:
-                await update.message.reply_text(
-                    f"❌ Failed to renew subscription. User {user_id} may not have an existing subscription."
-                )
-
-        except ValueError:
-            await update.message.reply_text("❌ Invalid number of days. Please use a number.")
-        except Exception as e:
-            await update.message.reply_text(f"❌ Error renewing subscription: {e}")
-            logger.error(f"Error in renewsub command: {e}")
-
-    async def _cmd_list_subscriptions(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Admin command: /listsubs"""
-        if not update.effective_user or not self._is_admin(update.effective_user.id):
-            return
-
-        try:
-            subscriptions = await self.db_manager.get_active_subscriptions()
-
-            if not subscriptions:
-                await update.message.reply_text("📋 No active subscriptions found.")
-                return
-
-            message = "📋 **Active Subscriptions:**\n\n"
-            now = datetime.now()
-
-            for user_id, expires_at, added_by, notes in subscriptions:
-                try:
-                    expiry_date = datetime.fromisoformat(expires_at)
-                    time_left = expiry_date - now
-                    
-                    if time_left.total_seconds() > 0:
-                        days_left = time_left.days
-                        hours_left = time_left.seconds // 3600
-                        status = f"{days_left}d {hours_left}h remaining"
-                        status_emoji = "🟢" if days_left > 3 else "🟡" if days_left > 0 else "🔴"
-                    else:
-                        status = "EXPIRED"
-                        status_emoji = "🔴"
-
-                    message += f"{status_emoji} **User {user_id}**\n"
-                    message += f"   Expires: {expires_at[:19].replace('T', ' ')}\n"
-                    message += f"   Status: {status}\n"
-                    if notes:
-                        message += f"   Notes: {notes}\n"
-                    message += "\n"
-
-                except Exception as e:
-                    logger.error(f"Error processing subscription for user {user_id}: {e}")
-                    continue
-
-            # Split message if too long
-            if len(message) > 4000:
-                parts = [message[i:i+4000] for i in range(0, len(message), 4000)]
-                for i, part in enumerate(parts):
-                    if i == 0:
-                        await update.message.reply_text(part, parse_mode='Markdown')
-                    else:
-                        await update.message.reply_text(f"(continued)\n{part}", parse_mode='Markdown')
-            else:
-                await update.message.reply_text(message, parse_mode='Markdown')
-
-        except Exception as e:
-            await update.message.reply_text(f"❌ Error listing subscriptions: {e}")
-            logger.error(f"Error in listsubs command: {e}")
-
-    async def _cmd_check_access(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Check if bots can access the chats configured in pairs"""
-        if not self._is_admin(update.effective_user.id):
-            return
-
-        try:
-            if context.args and context.args[0].isdigit():
-                # Check specific pair
-                pair_id = int(context.args[0])
-                if pair_id not in self.pairs:
-                    await update.message.reply_text("❌ Pair not found.")
-                    return
-                pairs_to_check = [self.pairs[pair_id]]
-            else:
-                # Check all pairs
-                pairs_to_check = list(self.pairs.values())
-
-            if not pairs_to_check:
-                await update.message.reply_text("📋 No pairs configured.")
-                return
-
-            message = "🔍 **Chat Access Check:**\n\n"
-            issues_found = []
-
-            for pair in pairs_to_check:
-                message += f"**Pair {pair.id}: {pair.name}**\n"
-                message += f"Source: `{pair.source_chat_id}`\n"
-                message += f"Destination: `{pair.destination_chat_id}`\n"
-
-                # Determine which bot to use
-                bot = None
-                bot_name = "Unknown"
-                
-                if pair.bot_token_id:
-                    # Use custom bot token
-                    try:
-                        custom_token = await self.db_manager.get_bot_token_by_id(pair.bot_token_id)
-                        if custom_token and custom_token['is_active']:
-                            bot = await self._get_or_create_custom_bot(pair.bot_token_id)
-                            bot_name = custom_token['name']
-                            message += f"Bot: {bot_name} (Custom)\n"
-                        else:
-                            message += f"❌ Custom bot token {pair.bot_token_id} not found/inactive\n"
-                            issues_found.append(f"Pair {pair.id}: Custom bot token issue")
-                            continue
-                    except Exception as e:
-                        message += f"❌ Error loading custom bot: {e}\n"
-                        continue
-                else:
-                    # Use default bot
-                    if self.telegram_bots:
-                        bot = self.telegram_bots[0]
-                        bot_name = "Default Bot"
-                        message += f"Bot: {bot_name}\n"
-                    else:
-                        message += f"❌ No default bots available\n"
-                        continue
-
-                # Test access to both chats
-                if bot:
-                    # Test source chat
-                    try:
-                        source_chat = await bot.get_chat(pair.source_chat_id)
-                        message += f"✅ Source: {source_chat.title}\n"
-                    except Exception as e:
-                        message += f"⚠️ Source access issue: {str(e)[:50]}...\n"
-
-                    # Test destination chat
-                    try:
-                        dest_chat = await bot.get_chat(pair.destination_chat_id)
-                        message += f"✅ Destination: {dest_chat.title}\n"
-                    except Exception as e:
-                        message += f"❌ **Destination access failed**: {str(e)[:50]}...\n"
-                        if "Chat not found" in str(e):
-                            message += f"   → **This is causing forwarding failures!**\n"
-                            message += f"   → Add bot to destination chat\n"
-                            issues_found.append(f"Pair {pair.id}: Bot not in destination chat")
-
-                message += "\n"
-
-            # Add summary
-            if issues_found:
-                message += "⚠️ **Issues Found:**\n"
-                for issue in issues_found:
-                    message += f"• {issue}\n"
-            else:
-                message += "✅ All configured pairs have proper bot access"
-
-            # Split long messages
-            if len(message) > 4000:
-                parts = [message[i:i+4000] for i in range(0, len(message), 4000)]
-                for i, part in enumerate(parts):
-                    await update.message.reply_text(part, parse_mode='Markdown')
-            else:
-                await update.message.reply_text(message, parse_mode='Markdown')
-
-        except Exception as e:
-            await update.message.reply_text(f"❌ Error checking chat access: {e}")
-            logger.error(f"Error in checkaccess command: {e}")
+            logger.error(f"Error checking image block: {e}")
+            return False

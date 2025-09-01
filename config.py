@@ -75,6 +75,11 @@ class Config:
         # Image processing settings
         self.ENABLE_IMAGE_PROCESSING = os.getenv('ENABLE_IMAGE_PROCESSING', 'true').lower() == 'true'
         
+        # Topic forwarding settings
+        self.ENABLE_TOPIC_FORWARDING = os.getenv('ENABLE_TOPIC_FORWARDING', 'true').lower() == 'true'
+        self.TOPIC_MAPPING_CLEANUP_DAYS = int(os.getenv('TOPIC_MAPPING_CLEANUP_DAYS', '30'))
+        self.MAX_TOPIC_MAPPINGS = int(os.getenv('MAX_TOPIC_MAPPINGS', '50000'))
+        
     def _parse_blocked_words(self) -> List[str]:
         """Parse global blocked words from environment"""
         blocked_words_str = os.getenv('GLOBAL_BLOCKED_WORDS', '')

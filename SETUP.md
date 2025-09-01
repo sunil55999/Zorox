@@ -70,6 +70,12 @@ ADMIN_USER_IDS=123456789,987654321
 - `/footerregex <pair_id> <regex>` - Set footer removal pattern
 - `/testfilter <pair_id> <text>` - Test filters on text
 
+### Topic Forwarding
+- `/addtopicpair <source_chat> <topic_id> <dest_channel> <name>` - Add topic→channel pair
+- `/listtopicpairs` - List all topic pairs  
+- `/removetopicpair <source_chat> <topic_id> <dest_channel>` - Remove topic pair
+- `/topicstats` - Topic forwarding statistics
+
 ## Features
 
 ### Image Blocking
@@ -89,6 +95,13 @@ ADMIN_USER_IDS=123456789,987654321
 - **Web page previews maintained**
 - **Complete reply chain preservation**
 - **Real-time edit/delete synchronization**
+
+### Topic Forwarding Support
+- **Group Topic → Channel forwarding**
+- **Reply mapping and preservation**
+- **Edit/delete synchronization for topics**
+- **All existing filters apply to topic messages**
+- **Channel → Channel forwarding remains unaffected**
 
 ### Multi-Bot Load Balancing
 - **Automatic load distribution**
@@ -112,6 +125,16 @@ To copy messages between chats, you need their chat IDs:
 1. **For channels**: Forward a message from the channel to @userinfobot
 2. **For groups**: Add @userinfobot to the group and send `/id`
 3. **For private chats**: Send `/id` to @userinfobot
+
+## Getting Topic IDs
+
+For group topics, you need the topic ID:
+
+1. **Enable forum mode** in your group (Group Settings → Topics)
+2. **Create or find the topic** you want to forward from
+3. **Send a message** in that topic and check the message details
+4. **Use developer tools** or forward a topic message to get the topic ID
+5. **Alternative**: Use `/addtopicpair` with trial and error for topic ID
 
 ## Security Notes
 

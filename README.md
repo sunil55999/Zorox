@@ -17,6 +17,8 @@ This system copies messages between Telegram channels/groups with sophisticated 
 - ✅ **Health monitoring and diagnostics**
 - ✅ **Queue management** with priority processing
 - ✅ **Error tracking and logging**
+- ✅ **Group Topic → Channel forwarding** with reply mapping
+- ✅ **Mixed forwarding support** (channel→channel + topic→channel)
 
 ## Bot Management Commands
 
@@ -34,6 +36,12 @@ This system copies messages between Telegram channels/groups with sophisticated 
 - `/delpair <id>` - Delete pair
 - `/editpair <id> <setting> <value>` - Edit pair settings
 - `/pairinfo <id>` - Detailed pair information
+
+### Topic Forwarding
+- `/addtopicpair <source_chat> <topic_id> <dest_channel> <name>` - Add topic→channel pair
+- `/listtopicpairs` - List all topic pairs
+- `/removetopicpair <source_chat> <topic_id> <dest_channel>` - Remove topic pair
+- `/topicstats` - Topic forwarding statistics
 
 ### Bot Management
 - `/bots` - List all bot instances
@@ -157,6 +165,12 @@ The system follows a modular, async-first architecture:
 
 ```
 /addpair -1001234567890 -1009876543210 "News Channel → Discussion"
+```
+
+### Creating a Topic Forwarding Pair
+
+```
+/addtopicpair -1001234567890 123 -1009876543210 "Trading Signals Topic"
 ```
 
 ### Monitoring System Health
