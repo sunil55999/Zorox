@@ -7,7 +7,7 @@ import json
 import logging
 import asyncio
 import os
-from typing import Dict, Optional, Tuple, Any
+from typing import Dict, Optional, Tuple, Any, List
 from datetime import datetime
 from dataclasses import dataclass, field
 
@@ -44,8 +44,8 @@ class TopicManager:
         
         # Topic pairs configuration
         # Key: (source_chat_id, topic_id)
-        # Value: list of destination channel IDs
-        self.topic_pairs: Dict[Tuple[int, int], List[int]] = {}
+        # Value: list of destination channel IDs with their pair configs
+        self.topic_pairs: Dict[Tuple[int, int], List[Dict[str, Any]]] = {}
         
         # Auto-save task
         self._save_task: Optional[asyncio.Task] = None
@@ -60,7 +60,7 @@ class TopicManager:
             # Start auto-save task
             self._save_task = asyncio.create_task(self._auto_save_loop())
             
-            logger.info(f"Topic manager initialized with {len(self.forwarded_map)} mappings")
+            logger.info(f"Topic manager initialized with {len(self.forwarded_map)} mappings and {len(self.topic_pairs)} topic pairs")
             
         except Exception as e:
             logger.error(f"Failed to initialize topic manager: {e}")
@@ -87,12 +87,21 @@ class TopicManager:
                     
                 # Convert string keys back to tuples
                 for key_str, value in data.get('forwarded_map', {}).items():
-                    key = tuple(map(int, key_str.strip('()').split(', ')))
-                    self.forwarded_map[key] = tuple(value)
+                    try:
+                        # Parse key string like "(123, 456, 789)"
+                        key_parts = key_str.strip('()').split(', ')
+                        key = tuple(int(part) for part in key_parts)
+                        self.forwarded_map[key] = tuple(value)
+                    except (ValueError, IndexError) as e:
+                        logger.warning(f"Skipping invalid mapping key: {key_str} - {e}")
                 
                 for key_str, value in data.get('reverse_map', {}).items():
-                    key = tuple(map(int, key_str.strip('()').split(', ')))
-                    self.reverse_map[key] = tuple(value)
+                    try:
+                        key_parts = key_str.strip('()').split(', ')
+                        key = tuple(int(part) for part in key_parts)
+                        self.reverse_map[key] = tuple(value)
+                    except (ValueError, IndexError) as e:
+                        logger.warning(f"Skipping invalid reverse mapping key: {key_str} - {e}")
                     
                 logger.info(f"Loaded {len(self.forwarded_map)} topic mappings from file")
             else:
@@ -109,7 +118,8 @@ class TopicManager:
             data = {
                 'forwarded_map': {str(k): list(v) for k, v in self.forwarded_map.items()},
                 'reverse_map': {str(k): list(v) for k, v in self.reverse_map.items()},
-                'last_saved': datetime.now().isoformat()
+                'last_saved': datetime.now().isoformat(),
+                'total_mappings': len(self.forwarded_map)
             }
             
             # Atomic write
@@ -144,13 +154,19 @@ class TopicManager:
             pairs = await self.db_manager.get_all_pairs()
             
             for pair in pairs:
-                # Check if source is a topic (negative chat ID with topic_id in filters)
+                # Check if source is a topic (has topic_id in filters)
                 topic_id = pair.filters.get('topic_id')
                 if topic_id is not None:
                     key = (pair.source_chat_id, topic_id)
                     if key not in self.topic_pairs:
                         self.topic_pairs[key] = []
-                    self.topic_pairs[key].append(pair.destination_chat_id)
+                    
+                    # Store full pair info for filtering
+                    self.topic_pairs[key].append({
+                        'pair_id': pair.id,
+                        'dest_channel_id': pair.destination_chat_id,
+                        'pair': pair
+                    })
                     
             logger.info(f"Loaded {len(self.topic_pairs)} topic pairs")
             
@@ -160,25 +176,19 @@ class TopicManager:
     def is_topic_message(self, event) -> bool:
         """Check if message is from a group topic"""
         try:
-            # Check if event has topic information
-            if hasattr(event, 'reply_to') and event.reply_to:
-                if hasattr(event.reply_to, 'forum_topic') and event.reply_to.forum_topic:
-                    return True
-                if hasattr(event.reply_to, 'reply_to_top_id'):
-                    return True
-            
-            # Check if chat is a supergroup with topics enabled
-            if hasattr(event, 'chat') and event.chat:
-                if hasattr(event.chat, 'forum') and event.chat.forum:
-                    return True
+            # Extract topic ID
+            topic_id = self._extract_topic_id(event)
+            if topic_id is None:
+                return False
             
             # Check if this chat/topic combination is in our topic pairs
-            topic_id = self._extract_topic_id(event)
-            if topic_id is not None:
-                key = (event.chat_id, topic_id)
-                return key in self.topic_pairs
+            key = (event.chat_id, topic_id)
+            is_topic = key in self.topic_pairs
             
-            return False
+            if is_topic:
+                logger.debug(f"Detected topic message: chat {event.chat_id}, topic {topic_id}")
+            
+            return is_topic
             
         except Exception as e:
             logger.debug(f"Error checking if topic message: {e}")
@@ -187,18 +197,26 @@ class TopicManager:
     def _extract_topic_id(self, event) -> Optional[int]:
         """Extract topic ID from event"""
         try:
-            # Try different ways to get topic ID
+            # Method 1: Check reply_to for forum topic
             if hasattr(event, 'reply_to') and event.reply_to:
-                if hasattr(event.reply_to, 'reply_to_top_id'):
+                if hasattr(event.reply_to, 'reply_to_top_id') and event.reply_to.reply_to_top_id:
                     return event.reply_to.reply_to_top_id
                 if hasattr(event.reply_to, 'forum_topic') and event.reply_to.forum_topic:
                     return getattr(event.reply_to.forum_topic, 'id', None)
             
-            # Check message attributes
+            # Method 2: Check message reply_to
             if hasattr(event, 'message') and event.message:
                 if hasattr(event.message, 'reply_to') and event.message.reply_to:
-                    if hasattr(event.message.reply_to, 'reply_to_top_id'):
+                    if hasattr(event.message.reply_to, 'reply_to_top_id') and event.message.reply_to.reply_to_top_id:
                         return event.message.reply_to.reply_to_top_id
+            
+            # Method 3: Check if chat is forum and extract from context
+            if hasattr(event, 'chat') and event.chat:
+                if hasattr(event.chat, 'forum') and event.chat.forum:
+                    # For forum messages, topic ID might be in different places
+                    if hasattr(event, 'reply_to_msg_id') and event.reply_to_msg_id:
+                        # This might be the topic root message ID
+                        return event.reply_to_msg_id
             
             return None
             
@@ -206,12 +224,12 @@ class TopicManager:
             logger.debug(f"Error extracting topic ID: {e}")
             return None
     
-    async def get_topic_destinations(self, source_chat_id: int, topic_id: int) -> List[int]:
-        """Get destination channels for a topic"""
+    async def get_topic_destinations(self, source_chat_id: int, topic_id: int) -> List[Dict[str, Any]]:
+        """Get destination channels and their pair configs for a topic"""
         key = (source_chat_id, topic_id)
         return self.topic_pairs.get(key, [])
     
-    async def add_topic_pair(self, source_chat_id: int, topic_id: int, dest_channel_id: int, name: str) -> int:
+    async def add_topic_pair(self, source_chat_id: int, topic_id: int, dest_channel_id: int, name: str, bot_index: int = 0) -> int:
         """Add a new topic → channel pair"""
         try:
             # Create pair in database with topic_id in filters
@@ -221,14 +239,15 @@ class TopicManager:
                 "remove_mentions": False,
                 "preserve_replies": True,
                 "sync_edits": True,
-                "sync_deletes": True
+                "sync_deletes": True,
+                "allowed_media_types": ["photo", "video", "document", "audio", "voice", "animation", "video_note", "sticker", "webpage", "unknown"]
             }
             
             pair_id = await self.db_manager.create_pair(
                 source_chat_id=source_chat_id,
                 destination_chat_id=dest_channel_id,
                 name=f"{name} (Topic {topic_id})",
-                bot_index=0
+                bot_index=bot_index
             )
             
             # Update pair with topic filters
@@ -236,14 +255,19 @@ class TopicManager:
             if pair:
                 pair.filters.update(filters)
                 await self.db_manager.update_pair(pair)
+                
+                # Add to topic pairs
+                key = (source_chat_id, topic_id)
+                if key not in self.topic_pairs:
+                    self.topic_pairs[key] = []
+                
+                self.topic_pairs[key].append({
+                    'pair_id': pair_id,
+                    'dest_channel_id': dest_channel_id,
+                    'pair': pair
+                })
             
-            # Add to topic pairs
-            key = (source_chat_id, topic_id)
-            if key not in self.topic_pairs:
-                self.topic_pairs[key] = []
-            self.topic_pairs[key].append(dest_channel_id)
-            
-            logger.info(f"Added topic pair: {source_chat_id}:{topic_id} → {dest_channel_id}")
+            logger.info(f"Added topic pair: {source_chat_id}:{topic_id} → {dest_channel_id} (pair_id: {pair_id})")
             return pair_id
             
         except Exception as e:
@@ -309,23 +333,90 @@ class TopicManager:
         except Exception as e:
             logger.error(f"Failed to remove topic mapping: {e}")
     
+    async def handle_topic_reply(self, event, source_chat_id: int, topic_id: int) -> Optional[int]:
+        """Handle reply logic for topic messages"""
+        try:
+            # Check if this is a reply
+            reply_to_msg_id = None
+            if hasattr(event, 'reply_to') and event.reply_to:
+                if hasattr(event.reply_to, 'reply_to_msg_id'):
+                    reply_to_msg_id = event.reply_to.reply_to_msg_id
+            elif hasattr(event, 'reply_to_msg_id') and event.reply_to_msg_id:
+                reply_to_msg_id = event.reply_to_msg_id
+            
+            if not reply_to_msg_id:
+                return None  # Not a reply
+            
+            # Get all destinations for this topic
+            destinations = await self.get_topic_destinations(source_chat_id, topic_id)
+            
+            # For each destination, check if the replied-to message was forwarded
+            for dest_info in destinations:
+                dest_channel_id = dest_info['dest_channel_id']
+                forwarded_msg_id = await self.get_forwarded_message_id(
+                    source_chat_id, topic_id, reply_to_msg_id, dest_channel_id
+                )
+                
+                if forwarded_msg_id:
+                    logger.debug(f"Found reply mapping: {reply_to_msg_id} → {forwarded_msg_id} in channel {dest_channel_id}")
+                    return forwarded_msg_id
+            
+            logger.debug(f"No reply mapping found for message {reply_to_msg_id} in topic {topic_id}")
+            return None
+            
+        except Exception as e:
+            logger.error(f"Error handling topic reply: {e}")
+            return None
+    
+    async def process_topic_edit(self, event, source_chat_id: int, topic_id: int) -> List[Tuple[int, int]]:
+        """Process edit for topic message, return list of (dest_channel_id, dest_msg_id) to update"""
+        try:
+            source_msg_id = event.id
+            key = (source_chat_id, topic_id, source_msg_id)
+            
+            # Find all forwarded copies
+            forwarded_copies = []
+            for (dest_channel_id, dest_msg_id), source_key in self.reverse_map.items():
+                if source_key == key:
+                    forwarded_copies.append((dest_channel_id, dest_msg_id))
+            
+            logger.debug(f"Found {len(forwarded_copies)} forwarded copies to edit for topic message {source_msg_id}")
+            return forwarded_copies
+            
+        except Exception as e:
+            logger.error(f"Error processing topic edit: {e}")
+            return []
+    
+    async def process_topic_delete(self, event, source_chat_id: int, topic_id: int) -> List[Tuple[int, int]]:
+        """Process delete for topic message, return list of (dest_channel_id, dest_msg_id) to delete"""
+        try:
+            source_msg_id = event.id
+            key = (source_chat_id, topic_id, source_msg_id)
+            
+            # Find all forwarded copies
+            forwarded_copies = []
+            for (dest_channel_id, dest_msg_id), source_key in self.reverse_map.items():
+                if source_key == key:
+                    forwarded_copies.append((dest_channel_id, dest_msg_id))
+            
+            # Remove mappings
+            await self.remove_mapping(source_chat_id, topic_id, source_msg_id)
+            
+            logger.debug(f"Found {len(forwarded_copies)} forwarded copies to delete for topic message {source_msg_id}")
+            return forwarded_copies
+            
+        except Exception as e:
+            logger.error(f"Error processing topic delete: {e}")
+            return []
+    
     async def cleanup_old_mappings(self, days: int = 30):
         """Clean up old mappings to prevent memory bloat"""
         try:
-            cutoff_time = datetime.now().timestamp() - (days * 24 * 3600)
             removed_count = 0
             
-            # Create list of keys to remove (avoid modifying dict during iteration)
-            keys_to_remove = []
-            
-            for key in self.forwarded_map.keys():
-                # Try to get timestamp from mapping (if stored)
-                # For now, we'll implement a simple size-based cleanup
-                pass
-            
             # If mappings exceed reasonable size, remove oldest entries
-            if len(self.forwarded_map) > 10000:  # Configurable threshold
-                # Sort by key (which includes message ID, roughly chronological)
+            if len(self.forwarded_map) > 50000:  # Configurable threshold for large systems
+                # Sort by key (message ID is roughly chronological)
                 sorted_keys = sorted(self.forwarded_map.keys(), key=lambda x: x[2])  # Sort by message ID
                 
                 # Remove oldest 20%
@@ -355,8 +446,55 @@ class TopicManager:
                 "total_mappings": len(self.forwarded_map),
                 "topic_pairs": len(self.topic_pairs),
                 "memory_usage_kb": len(str(self.forwarded_map)) / 1024,
+                "reverse_mappings": len(self.reverse_map),
                 "last_saved": datetime.now().isoformat()
             }
         except Exception as e:
             logger.error(f"Error getting mapping stats: {e}")
             return {}
+    
+    async def refresh_topic_pairs(self):
+        """Refresh topic pairs from database"""
+        try:
+            self.topic_pairs.clear()
+            await self._load_topic_pairs()
+            logger.info("Topic pairs refreshed from database")
+        except Exception as e:
+            logger.error(f"Failed to refresh topic pairs: {e}")
+    
+    def get_all_topic_pairs(self) -> Dict[Tuple[int, int], List[Dict[str, Any]]]:
+        """Get all topic pairs for management"""
+        return self.topic_pairs.copy()
+    
+    async def remove_topic_pair(self, source_chat_id: int, topic_id: int, dest_channel_id: int) -> bool:
+        """Remove a specific topic pair"""
+        try:
+            key = (source_chat_id, topic_id)
+            if key in self.topic_pairs:
+                # Remove the specific destination
+                self.topic_pairs[key] = [
+                    dest for dest in self.topic_pairs[key] 
+                    if dest['dest_channel_id'] != dest_channel_id
+                ]
+                
+                # If no destinations left, remove the key
+                if not self.topic_pairs[key]:
+                    del self.topic_pairs[key]
+                
+                # Also remove from database
+                pairs = await self.db_manager.get_all_pairs()
+                for pair in pairs:
+                    if (pair.source_chat_id == source_chat_id and 
+                        pair.destination_chat_id == dest_channel_id and
+                        pair.filters.get('topic_id') == topic_id):
+                        await self.db_manager.delete_pair(pair.id)
+                        break
+                
+                logger.info(f"Removed topic pair: {source_chat_id}:{topic_id} → {dest_channel_id}")
+                return True
+            
+            return False
+            
+        except Exception as e:
+            logger.error(f"Failed to remove topic pair: {e}")
+            return False
